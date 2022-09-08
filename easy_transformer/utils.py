@@ -1,42 +1,25 @@
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import gc
 
 
-def get_sample_from_dataset(sequences, nb_sample=2, print_len=10):
-    rd_idx = np.random.randint(0, len(sequences), 3)
+def get_sample_from_dataset(sequences, nb_sample=3, print_len=10):
+    rd_idx = np.random.randint(0, len(sequences), nb_sample)
     return "\n".join([str(sequences[k][:print_len]) + " ... " for k in rd_idx])
 
 
 def print_gpu_mem(step_name=""):
-    print(f"{step_name} ~ {np.round(torch.cuda.memory_allocated()/1e9, 2)} Go allocated on GPU.")
+    print(f"{step_name} ~ {np.round(torch.cuda.memory_allocated()/1e9, 2)} GB allocated on GPU.")
 
 
 def get_corner(tensor, n=2):
-    # Prints the top left corner of the tensor
-    if len(tensor.shape) == 0:
-        return tensor
-    elif len(tensor.shape) == 1:
-        return tensor[:n]
-    elif len(tensor.shape) == 2:
-        return tensor[:n, :n]
-    elif len(tensor.shape) == 3:
-        return tensor[:n, :n, :n]
-    elif len(tensor.shape) == 4:
-        return tensor[:n, :n, :n, :n]
-    elif len(tensor.shape) == 5:
-        return tensor[:n, :n, :n, :n, :n]
-    elif len(tensor.shape) == 6:
-        return tensor[:n, :n, :n, :n, :n, :n]
-    else:
-        # I never need tensors of rank > 6
-        raise ValueError(f"Tensor of shape {tensor.shape} is too big")
+    "Gets the length n hypercube at the top left corner of the tensor"
+    # this takes tensor[:n, :n, ..., :n] with as many :n slices as dimensions
+    index = (slice(0, n),) * tensor.ndim
+    return tensor[index]
 
 
 def to_numpy(tensor, flat=False):
-    if (type(tensor) != torch.Tensor) and (type(tensor) != torch.nn.parameter.Parameter):
+    if not isinstance(tensor, torch.Tensor): # catches parameters too
         return tensor
     if flat:
         return tensor.flatten().detach().cpu().numpy()
@@ -45,5 +28,5 @@ def to_numpy(tensor, flat=False):
 
 
 def gelu_new(input):
-    # Implementation of GeLU used by GPT2 - subtly different from PyTorch's
+    "Implementation of GeLU used by GPT2 - subtly different from PyTorch's"
     return 0.5 * input * (1.0 + torch.tanh(np.sqrt(2.0 / np.pi) * (input + 0.044715 * torch.pow(input, 3.0))))
