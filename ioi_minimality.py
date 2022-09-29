@@ -384,8 +384,13 @@ for i, circuit_class in enumerate(["name mover"]):
         print(extra_v, metric_calc)
 #%% # new experiment idea: the duplicators and induction heads shouldn't care where their attention is going, provided that
 # it goes to either S or S+1.
+# hmm try variable cycle
 
-for j in range(2, 4):
+LOWER_BOUND = -1
+UPPER_BOUND = 1
+
+for j in range(LOWER_BOUND, UP): 
+    print("unsure about cycle length")    
     s_positions = ioi_dataset.word_idx["S"]
 
     # [batch, head_index, query_pos, key_pos] # so pass dim=1 to ignore the head
@@ -435,3 +440,5 @@ for j in range(2, 4):
     print(
         f"Initially there's a logit difference of {ld}, and after permuting by {j-1}, the new logit difference is {ld2=}"
     )
+
+# %%
