@@ -518,4 +518,7 @@ class EasyTransformer(HookedRootModule):
         state_dict['unembed.W_U'] = state_dict['unembed.W_U'] - state_dict['unembed.W_U'].mean(0, keepdim=True)
         state_dict['unembed.b_U'] = state_dict['unembed.b_U'] - state_dict['unembed.b_U'].mean()
         return state_dict
-        
+    
+    def set_use_attn_result(self, use_attn_result):
+        print(f"Setting use_attn_result to {use_attn_result}")
+        self.cfg.use_attn_result = use_attn_result

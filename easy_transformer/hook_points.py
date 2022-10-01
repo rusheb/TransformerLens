@@ -129,15 +129,19 @@ class HookedRootModule(nn.Module):
         self.remove_all_hook_fns(direction)
         self.is_caching = False
 
-    def cache_all(self, cache, incl_bwd=False, device=None, remove_batch_dim=False):
+    def setup_caching_hooks_all(self, cache, incl_bwd=False, device=None, remove_batch_dim=False):
         # Caches all activations wrapped in a HookPoint
         # Remove batch dim is a utility for single batch inputs that removes the batch 
         # dimension from the cached activations - use ONLY for batches of size 1
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.cache_some(cache, lambda x: True, incl_bwd=incl_bwd, device=device, remove_batch_dim=remove_batch_dim)
+        self.setup_caching_hooks_some(cache, lambda x: True, incl_bwd=incl_bwd, device=device, remove_batch_dim=remove_batch_dim)
 
-    def cache_some(self, cache, names: Callable[[str], bool], incl_bwd=False, device=None, remove_batch_dim=False):
+    def cache_all(self, *args, **kwargs):
+        logging.warning("cache_all is deprecated - use setup_caching_hooks_all instead")
+        self.setup_caching_hooks_all(*args, **kwargs)
+    
+    def setup_caching_hooks_some(self, cache, names: Callable[[str], bool], incl_bwd=False, device=None, remove_batch_dim=False):
         """Cache a list of hook provided by names, Boolean function on names"""
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -158,6 +162,10 @@ class HookedRootModule(nn.Module):
                 hp.add_hook(save_hook, "fwd")
                 if incl_bwd:
                     hp.add_hook(save_hook_back, "bwd")
+    
+    def cache_some(self, *args, **kwargs):
+        logging.warning("cache_some is deprecated - use setup_caching_hooks_some instead")
+        self.setup_caching_hooks_some(*args, **kwargs)
 
     def add_hook(self, name, hook, dir="fwd"):
         if type(name) == str:
@@ -169,7 +177,7 @@ class HookedRootModule(nn.Module):
                     hp.add_hook(hook, dir=dir)
 
     def run_with_hooks(
-        self, *args, fwd_hooks=[], bwd_hooks=[], reset_hooks_start=True, reset_hooks_end=True, clear_contexts=False
+        self, *args, fwd_hooks=[], bwd_hooks=[], reset_hooks_start=True, reset_hooks_end=True, clear_contexts=False, return_cache=False, remove_batch_dim=False, **model_kwargs
     ):
         """
         fwd_hooks: A list of (name, hook), where name is either the name of
@@ -180,6 +188,9 @@ class HookedRootModule(nn.Module):
         reset_hooks_end (bool): If True, all hooks are removed at the end (ie,
         including those added in this run)
         clear_contexts (bool): If True, clears hook contexts whenever hooks are reset
+        return_cache (bool): If True, caches all activations and returns a cache dictionary
+        remove_batch_dim (bool): If True, removes the batch dimension from all cached activations. Only applies if return_cache is True, and if batch dimension is 1.
+        
         Note that if we want to use backward hooks, we need to set
         reset_hooks_end to be False, so the backward hooks are still there - this function only runs a forward pass.
         """
@@ -203,9 +214,15 @@ class HookedRootModule(nn.Module):
                 for hook_name, hp in self.hook_dict:
                     if name(hook_name):
                         hp.add_hook(hook, dir="bwd")
-        out = self.forward(*args)
+        if return_cache:
+            cache = {}
+            self.setup_caching_hooks_all(cache, remove_batch_dim=remove_batch_dim)
+        out = self.forward(*args, **model_kwargs)
         if reset_hooks_end:
             if len(bwd_hooks) > 0:
                 logging.warning("WARNING: Hooks were reset at the end of run_with_hooks while backward hooks were set. This removes the backward hooks before a backward pass can occur")
             self.reset_hooks(clear_contexts)
-        return out
+        if return_cache:
+            return out, cache
+        else:
+            return out
