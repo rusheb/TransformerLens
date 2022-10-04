@@ -122,18 +122,33 @@ for i in tqdm(range(len(toks_raw))):
     # for i in range(20):
     #     print(i, model.tokenizer.decode(mm[1][i:i+1]))
 #%%
+
+BATCH_SIZE = 10
+
+def get_tokens(batch):
+    """Turn strings into token ids"""
+    list_of_toks = model.tokenizer(batch, padding=True)["input_ids"]
+    if len(list_of_toks[0]) < MAX_CONTEXT:
+        warnings.warn("Adding padding to batch")
+        for i in range(len(list_of_toks)):
+            list_of_toks[i] += [model.tokenizer.pad_token_id] * (MAX_CONTEXT - len(list_of_toks[i]))
+    return torch.Tensor(list_of_toks)[:,:MAX_CONTEXT].long()
+
 def log_probs_correct(model, dataset):
+    assert len(dataset) % BATCH_SIZE == 0, (len(dataset), BATCH_SIZE)
     all_log_probs = torch.zeros(size=(len(dataset), MAX_CONTEXT))
-    for i in tqdm(range(len(dataset))):
-        logits = model(dataset[i].unsqueeze(0).cuda())
-        log_probs = t.nn.functional.log_softmax(logits, dim=-1)[0]
-        all_log_probs[i][1:len(dataset[i])] = log_probs.detach().cpu()[torch.arange(0, min(1024, len(dataset[i])) - 1), cur_tensor[0][1:]] 
+    
+    for i in range(len(dataset) // BATCH_SIZE): 
+        logits = model(get_tokens(dataset[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]).cuda())
+        log_probs = t.nn.functional.log_softmax(logits, dim=-1)[0].detach().clone()
+        all_log_probs[i * BATCH_SIZE : (i + 1)*BATCH_SIZE][1:] = log_probs[torch.arange(0, min(1024, len(dataset[i])) - 1), cur_tensor[0][1:]] 
 
+log_probs_correct(model, owt_train_text)
 
-metric = ExperimentMetric(metric=log_probs_correct, dataset=toks, relative_metric = True)
-config = AblationConfig(abl_type="mean", target_module="attn_head", head_circuit="z",  cache_means=True, verbose=True)
-abl = EasyAblation(model, config, metric)
-result = abl.run_ablation()
+    metric = ExperimentMetric(metric=log_probs_correct, dataset=toks, relative_metric = True)
+    config = AblationConfig(abl_type="mean", target_module="attn_head", head_circuit="z",  cache_means=True, verbose=True)
+    abl = EasyAblation(model, config, metric)
+    result = abl.run_ablation()
 
 # #%%
 # for i, text in enumerate(owt_train_text):
