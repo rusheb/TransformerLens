@@ -19,7 +19,6 @@
 
 # %% [markdown]
 # ## Imports
-from turtle import color
 from easy_transformer.EasyTransformer import MODEL_NAMES_DICT, LayerNormPre
 from tqdm import tqdm
 import pandas as pd
@@ -546,6 +545,13 @@ def max_2d(m, k=1):
     return out, mf[inds]
 
 
+attn_vals = writing_direction_heatmap(
+    model,
+    ioi_dataset,
+    return_vals=True,
+    dir_mode="IO - S",
+    title="Output into IO - S token unembedding direction",
+)
 k = 20
 print(f"Top {k} heads (by magnitude):")
 all_grps = []
@@ -794,9 +800,11 @@ def attention_probs(
     attn_probs_variation_by_keys = torch.cat(attn_probs_variation_by_keys, dim=0)
     return attn_probs_variation_by_keys.detach().cpu()
 
+
+# %%
 circuit = CIRCUIT.copy()
-average_changes = torch.zeros(size = (12, 12, 3))
-no_times_used = torch.zeros(size = (12,))
+average_changes = torch.zeros(size=(12, 12, 3))
+no_times_used = torch.zeros(size=(12,))
 
 for idx, (layer, head_idx) in enumerate(tqdm(circuit["name mover"])):
     print(idx, "of", len(circuit["name mover"]))
@@ -818,11 +826,24 @@ for idx, (layer, head_idx) in enumerate(tqdm(circuit["name mover"])):
         head_circuit="result",  # we patch "result", the result of the attention head
         cache_act=True,
         verbose=False,
-        patch_fn=partial(patch_particular_token, token_type="IO"), # AND CHANGE THIS SHIT!
+        patch_fn=partial(patch_particular_token, token_type="IO"),  # AND CHANGE THIS SHIT!
         layers=(0, layer),
     )  # we stop at layer "LAYER" because it's useless to patch after layer 9 if what we measure is attention of a head at layer 9.
 
 # %%
+
+
+def patch_positions(z, source_act, hook, positions=["S2"]):  # we patch at the "to" token
+    for pos in positions:
+        z[torch.arange(ioi_dataset.N), ioi_dataset.word_idx[pos]] = source_act[
+            torch.arange(ioi_dataset.N), ioi_dataset.word_idx[pos]
+        ]
+    return z
+
+
+patch_last_tokens = partial(patch_positions, positions=["end"])
+
+
 config = PatchingConfig(
     source_dataset=abca_dataset.text_prompts,
     target_dataset=ioi_dataset.text_prompts,
@@ -970,12 +991,6 @@ show_attention_patterns(model, [(7, 3), (7, 9), (8, 6), (8, 10)], ioi_dataset[ID
 # %% [markdown]
 # What happend if we patch at S2 instead of END?
 # %%
-def patch_positions(z, source_act, hook, positions=["S2"]):  # we patch at the "to" token
-    for pos in positions:
-        z[torch.arange(ioi_dataset.N), ioi_dataset.word_idx[pos]] = source_act[
-            torch.arange(ioi_dataset.N), ioi_dataset.word_idx[pos]
-        ]
-    return z
 
 
 # %%
@@ -1793,3 +1808,153 @@ for i in tqdm(range(1000)):
     ioi_dataset = IOIDataset(prompt_type="mixed", N=N, tokenizer=model.tokenizer)
     prbs = probs(model, ioi_dataset)
     print(prbs.mean())
+
+
+# %% Investigation of identified heads on random tokens
+seq_len = 100
+rand_tokens = torch.randint(1000, 10000, (4, seq_len))
+rand_tokens_repeat = einops.repeat(rand_tokens, "batch pos -> batch (2 pos)")
+
+
+induction_scores_array = np.zeros((model.cfg.n_layers, model.cfg.n_heads))
+
+
+def calc_induction_score(attn_pattern, hook):
+    # Pattern has shape [batch, index, query_pos, key_pos]
+    induction_stripe = attn_pattern.diagonal(1 - seq_len, dim1=-2, dim2=-1)
+    induction_scores = einops.reduce(induction_stripe, "batch index pos -> index", "mean")
+    # Store the scores in a common array
+    induction_scores_array[hook.layer()] = induction_scores.detach().cpu().numpy()
+
+
+def filter_attn_hooks(hook_name):
+    split_name = hook_name.split(".")
+    return split_name[-1] == "hook_attn"
+
+
+induction_logits = model.run_with_hooks(rand_tokens_repeat, fwd_hooks=[(filter_attn_hooks, calc_induction_score)])
+px.imshow(induction_scores_array, labels={"y": "Layer", "x": "Head"}, color_continuous_scale="Blues")
+
+
+# %%
+from ioi_utils import compute_next_tok_dot_prod
+
+IDX = 0
+
+
+def zero_ablate(hook, z):
+    return torch.zeros_like(z)
+
+
+head_mask = torch.zeros(model.cfg.n_heads, model.cfg.n_heads)
+head_mask[5, 5] = 1
+head_mask[6, 9] = 1
+
+attn_head_mask = induction_scores_array > 0.8
+
+
+def prune_attn_heads(value, hook):
+    # Value has shape [batch, pos, index, d_head]
+    mask = attn_head_mask[hook.layer()]
+    value[:, :, mask] = 0.0
+    return value
+
+
+def filter_value_hooks(name):
+    return name.split(".")[-1] == "hook_v"
+
+
+model.add_hook(filter_value_hooks, prune_attn_heads)
+
+prod = np.zeros((model.cfg.n_layers, model.cfg.n_heads, len(rand_tokens_repeat[IDX])))
+for layer in range(12):
+    for head in range(12):
+        print(f"Layer {layer}, head {head}")
+        prod[layer, head, :] = np.concatenate(
+            [
+                np.array([0]),
+                np.array(
+                    compute_next_tok_dot_prod(
+                        model, rand_tokens_repeat[IDX : IDX + 1], layer, head, seq_tokenized=True
+                    )[IDX]
+                ),
+            ]
+        )
+
+
+# %%
+
+POS = 130
+K = 1
+for x in np.random.randint(0, seq_len, K):
+    print(f"Position {x}")
+    fig = px.imshow(prod[:, :, x], labels={"y": "Layer", "x": "Head"}, color_continuous_scale="Blues")
+    fig.show()
+
+for x in np.random.randint(seq_len, 2 * seq_len, K):
+    print(f"Position {x}")
+    fig = px.imshow(prod[:, :, x], labels={"y": "Layer", "x": "Head"}, color_continuous_scale="Blues")
+    fig.show()
+
+# %%
+
+
+def sort_mtx(mtx, return_idx=False, sort_by_abs=False):
+    mtx_flat = mtx.flatten()
+    if sort_by_abs:
+        all_sorted_idx = np.abs(mtx_flat).argsort()
+    else:
+        all_sorted_idx = mtx_flat.argsort()
+
+    sorted_idx = []
+    sorted_values = []
+    for i in range(len(all_sorted_idx)):
+        # print(np.unravel_index(all_sorted_idx[-i - 1], mtx.shape))
+        x, y = np.unravel_index(all_sorted_idx[-i - 1], mtx.shape)
+        sorted_idx.append((x, y))
+        sorted_values.append(mtx[x, y])
+    if return_idx:
+        return sorted_values, sorted_idx
+    else:
+        return sorted_values
+
+
+# %%
+
+important_heads = []
+# get heads with average of absolute dot product above 10
+for layer in range(12):
+    for head in range(12):
+        if np.mean(np.abs(prod[layer, head, seq_len:])) > 5:
+            important_heads.append((layer, head))
+
+#%%
+circuit_heads = []
+for n in CIRCUIT.keys():
+    circuit_heads += CIRCUIT[n]
+
+# %%
+
+vals, idx = sort_mtx(np.abs(prod[:, :, seq_len:]).mean(axis=-1), return_idx=True, sort_by_abs=True)
+
+
+colors = [((l, h) in circuit_heads) for (l, h) in idx]
+
+fig = px.bar(
+    x=[f"{x[0]}.{x[1]}" for x in idx],
+    y=vals,
+    color=colors,
+    title="Average absolute dot prod with next token on repeated sequence (after zero-KO of 6.9 and 5.5)",
+)
+
+fig.update_layout(xaxis={"categoryorder": "array", "categoryarray": [f"{x[0]}.{x[1]}" for x in idx]})
+fig.show()
+
+# %%
+heads = [(10, 10), (9, 6), (10, 6), (10, 7), (11, 10), (10, 1), (9, 9), (10, 2), (7, 2), (9, 1), (9, 0), (11, 7)]
+
+all_prods = {f"{layer}.{head}": prod[layer, head, :] for (layer, head) in important_heads}
+
+px.line(all_prods, labels={"index": "Position in sequence of random tokens", "value": "Dot product"})
+
+# %%
