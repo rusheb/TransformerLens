@@ -3,7 +3,6 @@ from easy_transformer import EasyTransformer
 import logging
 import sys
 from ioi_circuit_extraction import *
-import optuna
 from ioi_dataset import *
 import IPython
 from tqdm import tqdm
@@ -81,8 +80,11 @@ if ipython is not None:
     ipython.magic("load_ext autoreload")
     ipython.magic("autoreload 2")
 
+
 def e():
     torch.cuda.empty_cache()
+
+
 # %%
 model = EasyTransformer("gpt2", use_attn_result=True).cuda()
 N = 100
@@ -105,12 +107,14 @@ e()
 #%%
 all_log_probs = torch.zeros(size=(len(owt_train_text), MAX_CONTEXT))
 
-for i in tqdm(range(len(toks_raw))):
+for i in tqdm(range(1)):
     e()
     cur_tensor = torch.tensor(toks_raw[i][:MAX_CONTEXT]).cuda().unsqueeze(0)
     logits = model(cur_tensor.cuda())
     log_probs = t.nn.functional.log_softmax(logits, dim=-1)[0]
-    all_log_probs[i][1:len(toks_raw[i])] = log_probs.detach().cpu()[torch.arange(0, min(1024, len(toks_raw[i])) - 1), cur_tensor[0][1:]] 
+    all_log_probs[i][1 : len(toks_raw[i])] = log_probs.detach().cpu()[
+        torch.arange(0, min(1024, len(toks_raw[i])) - 1), cur_tensor[0][1:]
+    ]
 
     if i == 0:
         assert 0.9 < torch.exp(all_log_probs[0][8]) < 1.0, "You didn't complete Adolf -> Hitler"
@@ -123,7 +127,8 @@ for i in tqdm(range(len(toks_raw))):
     #     print(i, model.tokenizer.decode(mm[1][i:i+1]))
 #%%
 
-BATCH_SIZE = 10
+BATCH_SIZE = 5
+
 
 def get_tokens(batch):
     """Turn strings into token ids"""
@@ -132,23 +137,39 @@ def get_tokens(batch):
         warnings.warn("Adding padding to batch")
         for i in range(len(list_of_toks)):
             list_of_toks[i] += [model.tokenizer.pad_token_id] * (MAX_CONTEXT - len(list_of_toks[i]))
-    return torch.Tensor(list_of_toks)[:,:MAX_CONTEXT].long()
+    return torch.Tensor(list_of_toks)[:, :MAX_CONTEXT].long()
+
 
 def log_probs_correct(model, dataset):
     assert len(dataset) % BATCH_SIZE == 0, (len(dataset), BATCH_SIZE)
     all_log_probs = torch.zeros(size=(len(dataset), MAX_CONTEXT))
-    
-    for i in range(len(dataset) // BATCH_SIZE): 
-        logits = model(get_tokens(dataset[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]).cuda())
+
+    for i in range(len(dataset) // BATCH_SIZE):
+        toks = get_tokens(dataset[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]).cuda()
+        logits = model(toks)
         log_probs = t.nn.functional.log_softmax(logits, dim=-1)[0].detach().clone()
-        all_log_probs[i * BATCH_SIZE : (i + 1)*BATCH_SIZE][1:] = log_probs[torch.arange(0, min(1024, len(dataset[i])) - 1), cur_tensor[0][1:]] 
 
-log_probs_correct(model, owt_train_text)
+        all_log_probs[i * BATCH_SIZE : (i + 1) * BATCH_SIZE, 1:] = log_probs[
+            einops.repeat(torch.arange(0, MAX_CONTEXT - 1), "... -> s ...", s=BATCH_SIZE), toks[:, 1:]
+        ].cpu()
+    return all_log_probs
 
-    metric = ExperimentMetric(metric=log_probs_correct, dataset=toks, relative_metric = True)
-    config = AblationConfig(abl_type="mean", target_module="attn_head", head_circuit="z",  cache_means=True, verbose=True)
-    abl = EasyAblation(model, config, metric)
-    result = abl.run_ablation()
+
+# %%
+lp = log_probs_correct(model, owt_train_text)
+
+# %%
+metric = ExperimentMetric(metric=log_probs_correct, dataset=owt_train_text, relative_metric=True, scalar_metric=False)
+config = AblationConfig(
+    abl_type="zero",
+    target_module="attn_head",
+    head_circuit="result",
+    cache_means=True,
+    verbose=True,
+    # mean_dataset=get_tokens(owt_train_text),
+)
+abl = EasyAblation(model, config, metric)
+result = abl.run_ablation()
 
 # #%%
 # for i, text in enumerate(owt_train_text):
@@ -161,5 +182,18 @@ log_probs_correct(model, owt_train_text)
 #     logits = model(toks)
 #     log_probs = t.nn.functional.log_softmax(logits, dim=-1).clone()
 
-#     metric = ExperimentMetric()    
+#     metric = ExperimentMetric()
+# %%
+result[:, :, :, 0] = 0
+result = result.numpy()
+
+from ioi_utils import print_toks_with_color
+
+# %%
+l, h = 10, 0
+seq_idx = 2
+seq_toks = show_tokens(owt_train_text[seq_idx], model, return_list=True)[:MAX_CONTEXT]
+print_toks_with_color(seq_toks, result[l, h, seq_idx], show_high=True, show_low=True)
+
+
 # %%
