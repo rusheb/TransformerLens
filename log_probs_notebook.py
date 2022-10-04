@@ -130,14 +130,14 @@ for i in tqdm(range(1)):
 BATCH_SIZE = 5
 
 
-def get_tokens(batch):
+def get_tokens(batch, max_context=MAX_CONTEXT):
     """Turn strings into token ids"""
     list_of_toks = model.tokenizer(batch, padding=True)["input_ids"]
-    if len(list_of_toks[0]) < MAX_CONTEXT:
+    if len(list_of_toks[0]) < max_context:
         warnings.warn("Adding padding to batch")
         for i in range(len(list_of_toks)):
-            list_of_toks[i] += [model.tokenizer.pad_token_id] * (MAX_CONTEXT - len(list_of_toks[i]))
-    return torch.Tensor(list_of_toks)[:, :MAX_CONTEXT].long()
+            list_of_toks[i] += [model.tokenizer.pad_token_id] * (max_context - len(list_of_toks[i]))
+    return torch.Tensor(list_of_toks)[:, :max_context].long()
 
 
 def log_probs_correct(model, dataset):
@@ -161,12 +161,15 @@ lp = log_probs_correct(model, owt_train_text)
 # %%
 metric = ExperimentMetric(metric=log_probs_correct, dataset=owt_train_text, relative_metric=True, scalar_metric=False)
 config = AblationConfig(
-    abl_type="zero",
+    abl_type="mean",
     target_module="attn_head",
     head_circuit="result",
     cache_means=True,
     verbose=True,
-    # mean_dataset=get_tokens(owt_train_text),
+    mean_dataset=get_tokens(owt_train_text, max_context=100),
+    mean_along_position=True,
+    max_seq_len=MAX_CONTEXT,
+    batch_size=BATCH_SIZE,
 )
 abl = EasyAblation(model, config, metric)
 result = abl.run_ablation()
@@ -190,10 +193,15 @@ result = result.numpy()
 from ioi_utils import print_toks_with_color
 
 # %%
-l, h = 10, 0
-seq_idx = 2
+l, h = 5, 9
+seq_idx = 15
 seq_toks = show_tokens(owt_train_text[seq_idx], model, return_list=True)[:MAX_CONTEXT]
-print_toks_with_color(seq_toks, result[l, h, seq_idx], show_high=True, show_low=True)
+print_toks_with_color(
+    seq_toks,
+    result[l, h, seq_idx],
+    show_low=True,
+    clip_scale=(0.0, 0.1),
+)
 
 
 # %%

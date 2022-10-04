@@ -126,7 +126,7 @@ def show_attention_patterns(model, heads, ioi_dataset, mode="val", title_suffix=
     assert mode in [
         "attn",
         "val",
-    ]  # value weighted attention or attn for attention probs ... to Arthur, norming seems sketch 
+    ]  # value weighted attention or attn for attention probs ... to Arthur, norming seems sketch
     assert type(ioi_dataset) == IOIDataset
 
     for (layer, head) in heads:
@@ -175,16 +175,17 @@ def show_attention_patterns(model, heads, ioi_dataset, mode="val", title_suffix=
             if return_fig and not return_mtx:
                 return fig
             elif return_mtx and not return_fig:
-                attn_results[i,:,:] = attn.clone().cpu()
+                attn_results[i, :, :] = attn.clone().cpu()
             else:
                 fig.show()
 
         if return_fig and not return_mtx:
             return fig
         elif return_mtx and not return_fig:
-            if mode == "attn": 
+            if mode == "attn":
                 return attn_results
             raise NotImplementedError()
+
 
 def safe_del(a):
     """Try and delete a even if it doesn't yet exist"""
@@ -582,21 +583,30 @@ def get_gray_scale(val, min_val, max_val):
     min_col = 232
     max_val = max_val
     min_val = min_val
-    val = val
+    val = np.clip(val, min_val, max_val)
     return int(min_col + ((max_col - min_col) / (max_val - min_val)) * (val - min_val))
 
 
 def get_opacity(val, min_val, max_val):
+    val = np.clip(val, min_val, max_val)
     max_val = max_val
     min_val = min_val
     return (val - min_val) / (max_val - min_val)
 
 
-def print_toks_with_color(toks, color, show_low=False, show_high=False, show_all=False):
+def print_toks_with_color(toks, color, show_low=False, show_high=False, show_all=False, clip_scale=None):
+    if clip_scale is None:
+        clip_scale = (0, 1)
+    a, b = clip_scale
+
     min_v = min(color)
     max_v = max(color)
+
+    adj_min = min_v + a * (max_v - min_v)
+    adj_max = max_v - (1 - b) * (max_v - min_v)
+
     for i, t in enumerate(toks):
-        c = get_gray_scale(color[i], min_v, max_v)
+        c = get_gray_scale(color[i], adj_min, adj_max)
         text_c = 232 if c > 240 else 255
         show_value = show_all
         if show_low and c < 232 + 5:
