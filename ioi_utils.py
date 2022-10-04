@@ -126,7 +126,7 @@ def show_attention_patterns(model, heads, ioi_dataset, mode="val", title_suffix=
     assert mode in [
         "attn",
         "val",
-    ]  # value weighted attention or attn for attention probas
+    ]  # value weighted attention or attn for attention probs ... to Arthur, norming seems sketch 
     assert type(ioi_dataset) == IOIDataset
 
     for (layer, head) in heads:
@@ -175,7 +175,7 @@ def show_attention_patterns(model, heads, ioi_dataset, mode="val", title_suffix=
             if return_fig and not return_mtx:
                 return fig
             elif return_mtx and not return_fig:
-                attn_results[i,:current_length,:current_length] = attn.clone().cpu()
+                attn_results[i,:,:] = attn.clone().cpu()
             else:
                 fig.show()
 
