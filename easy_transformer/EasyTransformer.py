@@ -1,86 +1,37 @@
-from typing import Callable, Union, List, Tuple
+from mimetypes import init
+from typing import Callable, Union, List, Tuple, Dict, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import numpy as np
 import einops
 import logging
-
-from tqdm import tqdm
-import random
-import time
-
-from pathlib import Path
-import pickle
-import os
-
-import matplotlib.pyplot as plt
-import plotly.express as px
-import plotly.io as pio
-
-import plotly.graph_objects as go
-
-from torch.utils.data import DataLoader
+import tqdm.auto as tqdm
 
 from functools import *
-import pandas as pd
-import gc
-import collections
-import copy
 
-# import comet_ml
-import itertools
-
-from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoConfig,
+    AutoTokenizer,
+    PreTrainedTokenizer,
+)
 
 from easy_transformer.hook_points import HookedRootModule, HookPoint
-from easy_transformer.utils import gelu_new, to_numpy, get_corner, print_gpu_mem, get_sample_from_dataset
+from easy_transformer import EasyTransformerConfig
 
-VALID_MODEL_NAMES = [
-    "gpt2",
-    "gpt2-medium",
-    "gpt2-large",
-    "gpt2-xl",
-    "facebook/opt-125m",
-    "facebook/opt-1.3b",
-    "facebook/opt-2.7b",
-    "facebook/opt-6.7b",
-    "facebook/opt-13b",
-    "facebook/opt-30b",
-    "facebook/opt-66b",
-    "EleutherAI/gpt-neo-125M",
-    "EleutherAI/gpt-neo-1.3B",
-    "EleutherAI/gpt-neo-2.7B",
-    "stanford-gpt2-small-A",
-    "stanford-gpt2-small-B",
-    "stanford-gpt2-small-C",
-    "stanford-gpt2-small-D",
-    "stanford-gpt2-small-E",
-    "stanford-gpt2-medium-A",
-    "stanford-gpt2-medium-B",
-    "stanford-gpt2-medium-C",
-    "stanford-gpt2-medium-D",
-    "stanford-gpt2-medium-E",
-]
+from easy_transformer.caching import (
+    EasyTransformerKeyValueCache,
+    EasyTransformerKeyValueCacheEntry,
+)
 
-MODEL_NAMES_DICT = {
-    "stanford-gpt2-small-A":"stanford-crfm/alias-gpt2-small-x21",
-    "stanford-gpt2-small-B":"stanford-crfm/battlestar-gpt2-small-x49",
-    "stanford-gpt2-small-C":"stanford-crfm/caprica-gpt2-small-x81", 
-    "stanford-gpt2-small-D":"stanford-crfm/darkmatter-gpt2-small-x343",
-    "stanford-gpt2-small-E":"stanford-crfm/expanse-gpt2-small-x777",
-    "stanford-gpt2-medium-A":"stanford-crfm/arwen-gpt2-medium-x21",
-    "stanford-gpt2-medium-B":"stanford-crfm/beren-gpt2-medium-x49",
-    "stanford-gpt2-medium-C":"stanford-crfm/celebrimbor-gpt2-medium-x81",
-    "stanford-gpt2-medium-D":"stanford-crfm/durin-gpt2-medium-x343",
-    "stanford-gpt2-medium-E":"stanford-crfm/eowyn-gpt2-medium-x777",
-}
-# The steps for which there are checkpoints in the stanford crfm models - provided as reference
-STANFORD_CRFM_CHECKPOINTS = list(range(0, 100, 10))+list(range(100, 2000, 50))+list(range(2000, 20000, 100))+list(range(20000, 400000+1, 1000))
+from easy_transformer.components import *
+import easy_transformer.weight_conversion as weight_conversion
+from easy_transformer.utils import lm_cross_entropy_loss, sample_logits
 
-# TODO: Add Bloom, GPT-J and GPT-NeoX
+
 """
+TODO: Add Bloom, GPT-J and GPT-NeoX
 EleutherAI/gpt-j-6B
 EleutherAI/gpt-neox-20b
 bloom-350m
@@ -92,298 +43,315 @@ bloom (176B parameters)
 https://huggingface.co/docs/transformers/model_doc/bloom
 """
 
-# Define network architecture
-
-# Embed & Unembed
-class Embed(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.W_E = nn.Parameter(torch.empty(self.cfg["d_model"], self.cfg["d_vocab"]))
-
-    def forward(self, tokens):
-        # If A has shape [a, b] and B has shape [c, d], then A[:, B] has shape [a, c, d]
-        # B acts as a tensor of indices into the second dimension (so >=0 and <b)
-        return einops.rearrange(self.W_E[:, tokens], "d_model batch pos -> batch pos d_model")
-
-
-class Unembed(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.W_U = nn.Parameter(torch.empty(self.cfg["d_vocab"], self.cfg["d_model"]))
-        self.b_U = nn.Parameter(torch.empty(self.cfg["d_vocab"]))
-
-    def forward(self, tokens):
-        return torch.einsum("vm,bpm->bpv", self.W_U, tokens) + self.b_U  # [batch, pos, d_vocab]
-
-
-# Positional Embeddings
-class PosEmbed(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.W_pos = nn.Parameter(torch.empty(self.cfg["d_model"], self.cfg["n_ctx"]))
-
-    def forward(self, x):
-        # Output shape [pos, d_model] - will be broadcast along batch dim
-        return self.W_pos[:, : x.size(-1)].T  # [pos, d_model]
-
-
-# LayerNormPre
-# I fold the LayerNorm weights and biases into later weights and biases.
-# This is just the 'center and normalise' part of LayerNorm
-# Centering is equivalent to just deleting one direction of residual space,
-# and is equivalent to centering the weight matrices of everything writing to the residual stream
-# Normalising is a funkier non-linear operation, that projects the residual stream onto the unit hypersphere
-class LayerNormPre(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.eps = self.cfg["eps"]
-
-        # Adds a hook point for the normalisation scale factor
-        self.hook_scale = HookPoint()  # [batch, pos]
-
-    def forward(self, x):
-        x = x - x.mean(axis=-1, keepdim=True)  # [batch, pos, d_model]
-        scale = self.hook_scale(
-            (einops.reduce(x.pow(2), "batch pos embed -> batch pos 1", "mean") + self.eps).sqrt()
-        )  # [batch, pos, 1]
-        return x / scale
-
-
-# Attention
-class Attention(nn.Module):
-    def __init__(self, cfg, attn_type="global"):
-        super().__init__()
-        self.cfg = cfg
-        self.W_Q = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_head"], self.cfg["d_model"]))
-        self.W_K = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_head"], self.cfg["d_model"]))
-        self.W_V = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_head"], self.cfg["d_model"]))
-        self.W_O = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_model"], self.cfg["d_head"]))
-        self.b_Q = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_head"]))
-        self.b_K = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_head"]))
-        self.b_V = nn.Parameter(torch.empty(self.cfg["n_heads"], self.cfg["d_head"]))
-        self.b_O = nn.Parameter(torch.empty(self.cfg["d_model"]))
-
-        self.attn_type = attn_type
-        # Create a query_pos x key_pos mask, with True iff that query position
-        # can attend to that key position
-        causal_mask = torch.tril(torch.ones((self.cfg["n_ctx"], self.cfg["n_ctx"])).bool())
-        if self.attn_type == "global":
-            # For global attention, this is a lower triangular matrix - key <= query
-            self.register_buffer("mask", causal_mask)
-        elif self.attn_type == "local":
-            # For local, this is banded, query - window_size < key <= query
-            self.register_buffer("mask", torch.triu(causal_mask, 1 - self.cfg["window_size"]))
-        else:
-            raise ValueError(f"Invalid attention type: {self.attn_type}")
-
-        self.register_buffer("IGNORE", torch.tensor(-1e5))
-
-        if self.cfg["use_attn_scale"]:
-            self.attn_scale = np.sqrt(self.cfg["d_head"])
-        else:
-            self.attn_scale = 1.0
-
-        self.hook_k = HookPoint()  # [batch, pos, head_index, d_head]
-        self.hook_q = HookPoint()  # [batch, pos, head_index, d_head]
-        self.hook_v = HookPoint()  # [batch, pos, head_index, d_head]
-        self.hook_z = HookPoint()  # [batch, pos, head_index, d_head]
-        self.hook_attn_scores = HookPoint()  # [batch, head_index, query_pos, key_pos]
-        self.hook_attn = HookPoint()  # [batch, head_index, query_pos, key_pos]
-        self.hook_result = HookPoint()  # [batch, head_index, head_index, d_model]
-
-    def forward(self, x):
-        q = self.hook_q(torch.einsum("ihm,bpm->bpih", self.W_Q, x) + self.b_Q)  # [batch, pos, head_index, d_head]
-        k = self.hook_k(torch.einsum("ihm,bpm->bpih", self.W_K, x) + self.b_K)  # [batch, pos, head_index, d_head]
-        v = self.hook_v(torch.einsum("ihm,bpm->bpih", self.W_V, x) + self.b_V)  # [batch, pos, head_index, d_head]
-        attn_scores = torch.einsum("bpih,bqih->bipq", q, k) / self.attn_scale  # [batch, head_index, query_pos, key_pos]
-        attn_scores = self.hook_attn_scores(self.causal_mask(attn_scores))  # [batch, head_index, query_pos, key_pos]
-        attn_matrix = self.hook_attn(F.softmax(attn_scores, dim=-1))  # [batch, head_index, query_pos, key_pos]
-        z = self.hook_z(torch.einsum("bpih,biqp->bqih", v, attn_matrix))  # [batch, pos, head_index, d_head]
-        if self.cfg["use_attn_result"]:
-            result = self.hook_result(torch.einsum("imh,bqih->bqim", self.W_O, z))  # [batch, pos, head_index, d_model]
-            out = (
-                einops.reduce(result, "batch position index model->batch position model", "sum") + self.b_O
-            )  # [batch, pos, d_model]
-        else:
-            out = torch.einsum("idh,bqih->bqd", self.W_O, z) + self.b_O  # [batch, pos, d_model]
-        return out
-
-    def causal_mask(self, attn_scores):
-        return torch.where(self.mask[: attn_scores.size(-2), : attn_scores.size(-1)], attn_scores, self.IGNORE)
-
-
-# MLP Layers
-class MLP(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-        self.W_in = nn.Parameter(torch.empty(self.cfg["d_mlp"], self.cfg["d_model"]))
-        self.b_in = nn.Parameter(torch.empty(self.cfg["d_mlp"]))
-        self.W_out = nn.Parameter(torch.empty(self.cfg["d_model"], self.cfg["d_mlp"]))
-        self.b_out = nn.Parameter(torch.empty(self.cfg["d_model"]))
-
-        self.hook_pre = HookPoint()  # [batch, pos, d_mlp]
-        self.hook_post = HookPoint()  # [batch, pos, d_mlp]
-
-        if self.cfg["act_fn"] == "relu":
-            self.act_fn = F.relu
-        elif self.cfg["act_fn"] == "gelu_new":
-            self.act_fn = gelu_new
-        else:
-            raise ValueError(f"Invalid activation function name: {self.cfg['act_fn']}")
-
-    def forward(self, x):
-        x = self.hook_pre(torch.einsum("md,bpd->bpm", self.W_in, x) + self.b_in)  # [batch, pos, d_mlp]
-        x = self.hook_post(self.act_fn(x))  # [batch, pos, d_mlp]
-        x = torch.einsum("dm,bpm->bpd", self.W_out, x) + self.b_out  # [batch, pos, d_model]
-        return x
-
-
-# Transformer Block
-class TransformerBlock(nn.Module):
-    def __init__(self, cfg, block_index):
-        super().__init__()
-        self.cfg = cfg
-        self.ln1 = LayerNormPre(cfg)
-        if not self.cfg["use_local_attn"]:
-            self.attn = Attention(cfg, "global")
-        else:
-            attn_type = self.cfg["attn_types"][block_index]
-            self.attn = Attention(cfg, attn_type)
-        self.ln2 = LayerNormPre(cfg)
-        self.mlp = MLP(cfg)
-
-        self.hook_attn_out = HookPoint()  # [batch, pos, d_model]
-        self.hook_mlp_out = HookPoint()  # [batch, pos, d_model]
-        self.hook_resid_pre = HookPoint()  # [batch, pos, d_model]
-        self.hook_resid_mid = HookPoint()  # [batch, pos, d_model]
-        self.hook_resid_post = HookPoint()  # [batch, pos, d_model]
-
-    def forward(self, x):
-        resid_pre = self.hook_resid_pre(x)  # [batch, pos, d_model]
-        attn_out = self.hook_attn_out(self.attn(self.ln1(resid_pre)))  # [batch, pos, d_model]
-        resid_mid = self.hook_resid_mid(resid_pre + attn_out)  # [batch, pos, d_model]
-        
-        mlp_out = self.hook_mlp_out(self.mlp(self.ln2(resid_mid)))  # [batch, pos, d_model]
-        resid_post = self.hook_resid_post(resid_mid + mlp_out)  # [batch, pos, d_model]
-        return resid_post
-
-
 # Full transformer
 class EasyTransformer(HookedRootModule):
     """
-    This class implements a full Transformer using the above components, with
+    This class implements a full Transformer using the components in ./components.py, with
     HookPoints on every interesting activation. It inherits from HookedRootModule.
-    It is initialised with a model_name, and automatically loads the model weights
-    for that model, loads them into this model, folds in LayerNorm and centers
-    the weights
-    """
 
-    def __init__(self, model_name, use_attn_result=False, model=None, keep_original_model=False, center_weights=True, checkpoint=None):
+    It can have a pretrained Transformer's weights automatically loaded in via the EasyTransformer.from_pretrained class method. It can also be instantiated with randomly initialized weights via __init__ and being passed a dict or EasyTransformerConfig object. 
+    """
+    
+    VALID_PRETRAINED_MODEL_NAMES = weight_conversion.VALID_PRETRAINED_MODEL_NAMES
+    PRETRAINED_MODEL_NAMES_DICT = weight_conversion.PRETRAINED_MODEL_NAMES_DICT
+    STANFORD_CRFM_CHECKPOINTS = weight_conversion.STANFORD_CRFM_CHECKPOINTS
+
+    def __init__(
+        self,
+        cfg,
+        tokenizer = None,
+        move_to_device = True,
+    ):
         """
-        model_name (str): The name of the model to load, via HuggingFace
-        use_attn_result (bool): Says whether to explicitly calculate the amount
-            each head adds to the residual stream (with a hook) and THEN add it
-            up, vs just calculating the sum. This can be very memory intensive
-            for large models, so defaults to False
-        model: The loaded model from HuggingFace. If None, it is automatically
-            loaded from HuggingFace - this just saves memory if the model was
-            already loaded into RAM
-        keep_original_model (bool): If False, the original HuggingFace model is
-            deleted, otherwise it's kept as a self.model attribute
+        Model initialization. Note that if you want to load the model from pretrained weights, you should use the EasyTransformer.from_pretrained() class method instead of this one.
+
+        cfg Union[EasyTransformerConfig, Dict]: The config to use for the
+            model. 
+        tokenizer (*optional): The tokenizer to use for the model. If not
+            provided, it is inferred from cfg.tokenizer_name or initialized to None. 
+            If None, then the model cannot be passed strings, and d_vocab must be explicitly set.
+        move_to_device (bool): Whether to move the model to the device specified in cfg.
+            device.
         """
         super().__init__()
-        assert model_name in VALID_MODEL_NAMES, f"Invalid model name: {model_name}. Valid model names are: {VALID_MODEL_NAMES}"
-        self.model_name = model_name
-        if self.model_name in MODEL_NAMES_DICT:
-            self.full_model_name = MODEL_NAMES_DICT[self.model_name]
+        if isinstance(cfg, Dict):
+            cfg = EasyTransformerConfig(**cfg)
+        elif isinstance(cfg, str):
+            raise ValueError("Please pass in a config dictionary or EasyTransformerConfig object. If you want to load a pretrained model, use EasyTransformer.from_pretrained() instead.")
+        self.cfg = cfg
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+        if self.cfg.tokenizer_name is not None:
+            # If we have a tokenizer name, we can load it from HuggingFace
+            self.tokenizer = AutoTokenizer.from_pretrained(self.cfg.tokenizer_name)
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         else:
-            self.full_model_name = self.model_name
-        self.model_type = self.get_model_type(self.full_model_name)
-        if model is not None:
-            self.model = model
-        else:
-            if checkpoint is not None:
-                if 'stanford' not in self.model_name:
-                    logging.warning(f"Loading checkpoints is not supported for the model {self.model_name}. Loading without checkpoints")
-                    self.model = AutoModelForCausalLM.from_pretrained(self.full_model_name)
-                else:
-                    assert checkpoint in STANFORD_CRFM_CHECKPOINTS, f"Checkpoint {checkpoint} is not valid. Available checkpoints are {STANFORD_CRFM_CHECKPOINTS}"
-                    self.model = AutoModelForCausalLM.from_pretrained(self.full_model_name, revision=f"checkpoint-{checkpoint}")    
-            else:
-                self.model = AutoModelForCausalLM.from_pretrained(self.full_model_name)
-
-        self.cfg = self.convert_config(self.model.config, model_type=self.model_type)
-        self.cfg["use_attn_result"] = use_attn_result
-        self.cfg['checkpoint'] = checkpoint
-        self.cfg['model_type'] = self.model_type
-        self.cfg['model_name'] = self.model_name
-        self.cfg['full_model_name'] = self.full_model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(self.full_model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
+            # If no tokenizer name is provided, we assume we're training on an algorithmic task and will pass in tokens directly. In this case, we don't need a tokenizer.
+            self.tokenizer = None
+        
+        if not self.cfg.d_vocab:
+            # If we have a tokenizer, vocab size can be inferred from it.
+            assert (
+                self.tokenizer is not None
+            ), "Must provide a tokenizer if d_vocab is not provided"
+            self.cfg.d_vocab = max(self.tokenizer.vocab.values()) + 1
 
         self.embed = Embed(self.cfg)
         self.hook_embed = HookPoint()  # [batch, pos, d_model]
 
         self.pos_embed = PosEmbed(self.cfg)
-        self.hook_pos_embed = HookPoint()  # [batch, pos, d_model]
-
+        self.hook_pos_embed = HookPoint()  # [batch, pos, d__dictmodel]
+        
         self.blocks = nn.ModuleList(
-            [TransformerBlock(self.cfg, block_index) for block_index in range(self.cfg["n_layers"])]
+            [
+                TransformerBlock(self.cfg, block_index)
+                for block_index in range(self.cfg.n_layers)
+            ]
         )
-        self.ln_final = LayerNormPre(self.cfg)
+        
+        if self.cfg.normalization_type == "LN":
+            self.ln_final = LayerNorm(self.cfg)
+        elif self.cfg.normalization_type == "LNPre":
+            # We've folded in LayerNorm weights, so just need the center + scale parts
+            self.ln_final = LayerNormPre(self.cfg)
+        elif self.cfg.normalization_type is None:
+            # If it's None, don't create either layer
+            pass
+        else:
+            logging.warning(
+                f"Invalid normalization_type passed in {self.cfg.normalization_type}"
+            )
         self.unembed = Unembed(self.cfg)
 
+        if self.cfg.init_weights:
+            self.init_weights()
+
+        if move_to_device:
+            self.to(self.cfg.device)
+        
         # Gives each module a parameter with its name (relative to this root module)
         # Needed for HookPoints to work
         self.setup()
 
-        # Load model weights, and fold in layer norm weights
-        if self.model_type == "gpt2":
-            self.load_gpt2_weights(self.model)
-        elif self.model_type == "neo":
-            self.load_neo_weights(self.model)
-        elif self.model_type == "gptj":
-            self.load_gptj_weights(self.model)
-        elif self.model_type == "neox":
-            self.load_neox_weights(self.model)
-        elif self.model_type == "opt":
-            self.load_opt_weights(self.model)
+    def forward(
+        self, 
+        input: Union[str, torch.Tensor], 
+        return_type: Optional[str] = "logits", 
+        prepend_bos: bool = True, 
+        past_kv_cache: Optional[EasyTransformerKeyValueCache] = None
+        ) -> Union[None, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Input is either a batch of tokens ([batch, pos]) or a text string, a string is automatically tokenized to a batch of a single element. The prepend_bos flag only applies when inputting a text string.
 
-        # Set the average of each weight matrix writing to the residual stream to zero
-        # (Layer Norm removes the mean anyway, so this simplifies the weights
-        # without changing the computation)
-        if center_weights:
-            self.center_weights()
-
-        if not keep_original_model:
-            # Delete the original model to save memory
-            del self.model
-
-    def forward(self, x):
-        # Input x is either a batch of tokens ([batch, pos]) or a text string
-        if type(x) == str or type(x) == list:
+        return_type Optional[str]: The type of output to return. Can be one of: None (return nothing, don't calculate logits), 'logits' (return logits), 'loss' (return cross-entropy loss), 'both' (return logits and loss)
+        """
+        if type(input) == str or type(input) == list:
             # If text, convert to tokens (batch_size=1)
-            x = self.to_tokens(x)
-        embed = self.hook_embed(self.embed(x))  # [batch, pos, d_model]
-        pos_embed = self.hook_pos_embed(self.pos_embed(x))  # [batch, pos, d_model]
-        residual = embed + pos_embed  # [batch, pos, d_model]
-        for block in self.blocks:
+            assert (
+                self.tokenizer is not None
+            ), "Must provide a tokenizer if passing a string to the model"
+            tokens = self.to_tokens(input, prepend_bos=prepend_bos)
+        else:
+            tokens = input
+        assert isinstance(tokens, torch.Tensor)
+        # If we're doing caching, then we reuse keys and values from previous runs, as that's the only 
+        # way that past activations will affect the final logits. The cache contains those so we don't 
+        # need to recompute them. This is useful for generating text. As we have absolute positional 
+        # encodings, to implement this we have a `pos_offset` variable, defaulting to zero, which says 
+        # to offset which positional encodings are used (cached keys and values were calculated with 
+        # their own positional encodings).
+        if past_kv_cache is None:
+            pos_offset = 0
+        else:
+            batch_size, ctx_length = tokens.shape
+            cached_batch_size, cache_ctx_length, num_heads_in_cache, d_head_in_cache = past_kv_cache[0].past_keys.shape
+            assert cached_batch_size == batch_size
+            assert num_heads_in_cache == self.cfg.n_heads
+            assert d_head_in_cache == self.cfg.d_head
+            # If we want to generate from the empty string, we'd pass in an empty cache, so we need to handle that case
+            assert cache_ctx_length == 0 or ctx_length == 1, "Pass in one token at a time after loading cache"
+            pos_offset = cache_ctx_length
+        embed = self.hook_embed(self.embed(tokens))  # [batch, pos, d_model]
+        pos_embed = self.hook_pos_embed(
+            self.pos_embed(tokens, pos_offset)
+        )  # [batch, pos, d_model]
+        if self.cfg.positional_embedding_type != "shortformer":
+            residual = embed + pos_embed  # [batch, pos, d_model]
+            shortformer_pos_embed = None
+        else:
+            # If we're using shortformer style attention, we don't add the positional embedding to the residual stream. See EasyTransformerConfig for details
+            residual = embed
+            shortformer_pos_embed = pos_embed
+        for i, block in enumerate(self.blocks):
             # Note that each block includes skip connections, so we don't need
             # residual + block(residual)
-            residual = block(residual)  # [batch, pos, d_model]
-        x = self.unembed(self.ln_final(residual))  # [batch, pos, d_vocab]
-        return x
+            residual = block(
+                residual, 
+                past_kv_cache_entry = past_kv_cache[i] if past_kv_cache is not None else None, # Cache is contains a list of EasyTransformerKeyValueCache objects, one for each block
+                shortformer_pos_embed = shortformer_pos_embed
+            )  # [batch, pos, d_model]
+        if return_type is None:
+            return None
+        else:
+            if self.cfg.normalization_type is not None:
+                residual = self.ln_final(residual)  # [batch, pos, d_vocab]
+            logits = self.unembed(residual)  # [batch, pos, d_vocab]
+            if return_type == "logits":
+                return logits
+            else:
+                loss = lm_cross_entropy_loss(logits, tokens)
+                if return_type == "loss":
+                    return loss
+                elif return_type == "both":
+                    return {"logits": logits, "loss": loss}
+                else:
+                    logging.warning(f"Invalid return_type passed in: {return_type}")
+                    return None
+                
+    def set_tokenizer(self, tokenizer):
+        """
+        Sets the tokenizer to use for this model.
+        tokenizer (PreTrainedTokenizer): a pretrained HuggingFace tokenizer
+        """
+        assert isinstance(tokenizer, PreTrainedTokenizer)
+        self.tokenizer = tokenizer
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    def to_tokens(self, text):
-        return self.tokenizer(text, return_tensors="pt", padding=True)["input_ids"]
+    def to_tokens(self, input, prepend_bos=True):
+        assert self.tokenizer is not None, "Cannot use to_tokens without a tokenizer"
+        if prepend_bos:
+            if isinstance(input, str):
+                input = self.tokenizer.bos_token + input
+            else:
+                input = [self.tokenizer.bos_token + string for string in input]
+        return self.tokenizer(input, return_tensors="pt", padding=True)["input_ids"].to(self.cfg.device)
+    
+    def to_str_tokens(
+        self, 
+        input: Union[str, torch.Tensor, list], 
+        prepend_bos: bool = True
+        ):
+        """Method to map text, a list of text or tokens to a list of tokens as strings
 
-    def get_model_type(self, model_name):
-        if "gpt2" in model_name or "stanford" in model_name:
+        Args:
+            input (Union[str, list, torch.Tensor]): The input - either a string or a tensor of tokens. If tokens, should be a tensor of shape [pos] or [1, pos]
+            prepend_bos (bool, optional): Whether to prepend a BOS token. Only applies if input is a string. Defaults to True.
+
+        Returns:
+            str_tokens: List of individual tokens as strings
+        """
+        if isinstance(input, list):
+            return list(map(lambda tokens: self.to_str_tokens(tokens, prepend_bos), input))
+        elif isinstance(input, str):
+            tokens = self.to_tokens(input, prepend_bos=prepend_bos)[0]
+        elif isinstance(input, torch.Tensor):
+            tokens = input
+            tokens = tokens.squeeze() # Get rid of a trivial batch dimension
+            assert tokens.dim() == 1, f"Invalid tokens input to to_str_tokens, has shape: {tokens.shape}"
+        else:
+            raise ValueError(f"Invalid input type to to_str_tokens: {type(input)}")
+        str_tokens = self.tokenizer.batch_decode(tokens, clean_up_tokenization_spaces=False)
+        return str_tokens
+
+    @classmethod
+    def from_pretrained(cls, 
+                        model_name: str, 
+                        fold_ln = True, 
+                        center_writing_weights = True, 
+                        center_unembed = True,
+                        checkpoint = None,
+                        hf_model = None,
+                        device = None,
+                        **kwargs):
+        """Class method to load a pretrained model from HuggingFace and to automatically convert and load those weights into EasyTransformer format.
+        
+        See fold_layer_norm for more details on the folding and centering.
+
+        Args:
+            model_name (str): The model name - must be in VALID_MODEL_NAMES
+            fold_ln (bool, optional): Whether to fold in the LayerNorm weights to the 
+                subsequent linear layer. This does not change the computation. Defaults to True.
+            center_writing_weights (bool, optional): Whether to center weights writing to   
+                the residual stream (ie set mean to be zero). Due to LayerNorm this doesn't change the computation. Defaults to True.
+            center_unembed (bool, optional): Whether to center W_U (ie set mean to be zero). 
+                Softmax is translation invariant so this doesn't affect log probs or loss, but does change logits. Defaults to True.
+            keep_original_model (bool, optional): Whether to delete the model loaded from    HuggingFace (stored as model.hf_model). Defaults to False.
+            device (str, optional): The device to load the model onto. By default will load to CUDA if available, else CPU
+        """
+        assert (
+            (model_name in cls.VALID_PRETRAINED_MODEL_NAMES) or (model_name in cls.PRETRAINED_MODEL_NAMES_DICT)
+        ), f"Invalid model name: {model_name}. Valid model names are: {cls.VALID_PRETRAINED_MODEL_NAMES}"
+
+        # hf_model_name is the model's name on HuggingFace
+        if model_name in cls.PRETRAINED_MODEL_NAMES_DICT:
+            hf_model_name = cls.PRETRAINED_MODEL_NAMES_DICT[model_name]
+        else:
+            hf_model_name = model_name
+        # The model family (eg "gpt2" or "neo")
+        model_family = cls.get_model_family(hf_model_name)
+        
+        if hf_model is None:
+            if checkpoint is not None:
+                if "stanford" not in model_name:
+                    logging.warning(
+                        f"Loading checkpoints is not supported for the model {model_name}. Loading without checkpoints"
+                    )
+                    hf_model = AutoModelForCausalLM.from_pretrained(
+                        hf_model_name
+                    )
+                else:
+                    assert (
+                        checkpoint in cls.STANFORD_CRFM_CHECKPOINTS
+                    ), f"Checkpoint {checkpoint} is not valid. Available checkpoints are {cls.STANFORD_CRFM_CHECKPOINTS}"
+                    hf_model = AutoModelForCausalLM.from_pretrained(
+                        hf_model_name, revision=f"checkpoint-{checkpoint}"
+                    )
+            else:
+                hf_model = AutoModelForCausalLM.from_pretrained(
+                    hf_model_name
+                )
+
+        cfg = cls.convert_hf_config(
+            hf_model.config, model_family=model_family
+        )
+        if device is not None:
+            cfg.device = device
+        cfg.checkpoint = checkpoint
+        cfg.model_family = model_family
+        cfg.model_name = model_name
+
+        cfg.normalization_type = "LNPre" if fold_ln else "LN"
+        cfg.tokenizer_name = hf_model_name
+        cfg.init_weights = False
+        tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_name)
+        tokenizer.pad_token = tokenizer.eos_token
+
+        model = cls(cfg, **kwargs)
+
+        # Load model weights, and fold in layer norm weights
+        if model_family == "gpt2":
+            state_dict = weight_conversion.convert_gpt2_weights(hf_model, model.cfg)
+        elif model_family == "mistral":
+            # Stanford (Mistral) models have identical structure to GPT-2, but scale attention scores by 1/(layer_id+1) before softmax.
+            state_dict = weight_conversion.convert_gpt2_weights(hf_model, model.cfg)
+        elif model_family == "neo":
+            state_dict = weight_conversion.convert_neo_weights(hf_model, model.cfg)
+        elif model_family == "opt":
+            state_dict = weight_conversion.convert_opt_weights(hf_model, model.cfg)
+        else:
+            raise ValueError(f"Loading weights from this model family is not currently supported: {model_family}, generated from model name {model_name}. Feel free to open an issue on GitHub to request this feature.")
+        
+        model.load_and_process_state_dict(state_dict, 
+                        fold_ln=fold_ln, 
+                        center_writing_weights=center_writing_weights, 
+                        center_unembed=center_unembed,
+                        move_dict_to_device=True)
+        return model
+
+    @classmethod
+    def get_model_family(cls, model_name):
+        if "stanford" in model_name:
+            return "mistral"
+        elif "gpt2" in model_name and "stanford" not in model_name:
             return "gpt2"
         elif "opt" in model_name:
             return "opt"
@@ -391,240 +359,454 @@ class EasyTransformer(HookedRootModule):
             return "neox"
         elif model_name == "EleutherAI/gpt-j-6B":
             return "gptj"
-        elif "neo" in model_name:
+        elif model_name in ['EleutherAI/gpt-neo-125M', 'EleutherAI/gpt-neo-1.3B', 'EleutherAI/gpt-neo-2.7B',]:
+            # Important to exclude GPT-J and GPT-NeoX, they have different config.
             return "neo"
         else:
             raise ValueError(f"Invalid model name: {model_name}")
 
-    def convert_config(self, config, model_type):
-        if model_type == "neo":
-            cfg = {
-                "d_model": config.hidden_size,
-                "d_head": config.hidden_size // config.num_heads,
-                "n_heads": config.num_heads,
-                "d_mlp": config.hidden_size * 4,
-                "n_layers": config.num_layers,
-                "n_ctx": config.max_position_embeddings,
-                "eps": config.layer_norm_epsilon,
-                "d_vocab": config.vocab_size,
-                "attn_types": config.attention_layers,
-                "act_fn": config.activation_function,
+    @classmethod
+    def convert_hf_config(cls, hf_config, model_family):
+        cfg_dict = {}
+        if model_family == "neo":
+            cfg_dict = {
+                "d_model": hf_config.hidden_size,
+                "d_head": hf_config.hidden_size // hf_config.num_heads,
+                "n_heads": hf_config.num_heads,
+                "d_mlp": hf_config.hidden_size * 4,
+                "n_layers": hf_config.num_layers,
+                "n_ctx": hf_config.max_position_embeddings,
+                "eps": hf_config.layer_norm_epsilon,
+                "d_vocab": hf_config.vocab_size,
+                "attn_types": hf_config.attention_layers,
+                "act_fn": hf_config.activation_function,
                 "use_attn_scale": False,
                 "use_local_attn": True,
-                "window_size": config.window_size,
+                "window_size": hf_config.window_size,
+                "scale_attn_by_inverse_layer_idx": False,
             }
-        elif model_type == "gpt2":
-            cfg = {
-                "d_model": config.n_embd,
-                "d_head": config.n_embd // config.n_head,
-                "n_heads": config.n_head,
-                "d_mlp": config.n_embd * 4,
-                "n_layers": config.n_layer,
-                "n_ctx": config.n_ctx,
-                "eps": config.layer_norm_epsilon,
-                "d_vocab": config.vocab_size,
-                "act_fn": config.activation_function,
+        elif model_family == "gpt2":
+            cfg_dict = {
+                "d_model": hf_config.n_embd,
+                "d_head": hf_config.n_embd // hf_config.n_head,
+                "n_heads": hf_config.n_head,
+                "d_mlp": hf_config.n_embd * 4,
+                "n_layers": hf_config.n_layer,
+                "n_ctx": hf_config.n_ctx,
+                "eps": hf_config.layer_norm_epsilon,
+                "d_vocab": hf_config.vocab_size,
+                "act_fn": hf_config.activation_function,
                 "use_attn_scale": True,
                 "use_local_attn": False,
+                "scale_attn_by_inverse_layer_idx": False,
             }
-        elif model_type == "opt":
-            cfg = {
-                "d_model": config.hidden_size,
-                "d_head": config.hidden_size // config.num_attention_heads,
-                "n_heads": config.num_attention_heads,
-                "d_mlp": config.ffn_dim,
-                "n_layers": config.num_hidden_layers,
-                "n_ctx": config.max_position_embeddings,
+        elif model_family == "mistral":
+            cfg_dict = {
+                "d_model": hf_config.n_embd,
+                "d_head": hf_config.n_embd // hf_config.n_head,
+                "n_heads": hf_config.n_head,
+                "d_mlp": hf_config.n_embd * 4,
+                "n_layers": hf_config.n_layer,
+                "n_ctx": hf_config.n_ctx,
+                "eps": hf_config.layer_norm_epsilon,
+                "d_vocab": hf_config.vocab_size,
+                "act_fn": hf_config.activation_function,
+                "use_attn_scale": True,
+                "use_local_attn": False,
+                "scale_attn_by_inverse_layer_idx": True,
+            }
+        elif model_family == "opt":
+            cfg_dict = {
+                "d_model": hf_config.hidden_size,
+                "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
+                "n_heads": hf_config.num_attention_heads,
+                "d_mlp": hf_config.ffn_dim,
+                "n_layers": hf_config.num_hidden_layers,
+                "n_ctx": hf_config.max_position_embeddings,
                 "eps": 1e-5,
-                "d_vocab": config.vocab_size,
-                "act_fn": config.activation_function,
+                "d_vocab": hf_config.vocab_size,
+                "act_fn": hf_config.activation_function,
                 "use_attn_scale": True,
                 "use_local_attn": False,
+                "scale_attn_by_inverse_layer_idx": False,
             }
-        elif model_type == "gptj":
+        else:
             raise NotImplementedError
-        elif model_type == "neox":
-            raise NotImplementedError
-
-        cfg["model_name"] = self.model_name
-        cfg["model_type"] = model_type
+        cfg = EasyTransformerConfig.from_dict(cfg_dict)
         return cfg
 
-    def center_weights(self):
-        # Sets the average of each row of each weight matrix writing to the
-        # residual stream to zero
-        # LayerNorm subtracts the mean of the residual stream, and it's always
-        # applied when reading from the residual stream, so this dimension is
-        # purely noise
-        # Also does the same for W_U, since translating the logits doesn't affect
-        # the log_probs or loss
-        self.embed.W_E.data -= self.embed.W_E.mean(0, keepdim=True)
-        self.pos_embed.W_pos.data -= self.pos_embed.W_pos.mean(0, keepdim=True)
-        self.unembed.W_U.data -= self.unembed.W_U.mean(0, keepdim=True)
-        for block in self.blocks:
-            block.attn.W_O.data -= einops.reduce(block.attn.W_O, "index d_model d_head -> index 1 d_head", "mean")
-            block.mlp.W_out.data -= block.mlp.W_out.mean(0, keepdim=True)
+    def init_weights(self):
+        """
+        Initialize weights matrices with a normal of std=initializer_range (default=0.02). This roughly follows the GPT-2 paper's scheme (but with truncation, and not halving the std for W_pos).
 
-    def load_gpt2_weights(self, gpt2):
-        sd = self.state_dict()
+        LayerNorm weights are already initialized to 1.0, and all biases are initialized to 0.0 (including LayerNorm), so this just initializes weight matrices. 
+        
+        Weight matrices are set to empty by default (to save space + compute, since they're the bulk of the parameters), so it is important to call this if you are not loading in pretrained weights! Note that this function assumes that weight names being with W_
 
-        sd["embed.W_E"] = gpt2.transformer.wte.weight.T
-        sd["pos_embed.W_pos"] = gpt2.transformer.wpe.weight.T
+        Set seed here to ensure determinism.
 
-        for l in range(self.cfg["n_layers"]):
-            # In GPT-2, q,k,v are produced by one big linear map, whose output is
-            # concat([q, k, v])
-            W = gpt2.transformer.h[l].attn.c_attn.weight
-            w_ln_attn = gpt2.transformer.h[l].ln_1.weight
-            W_Q, W_K, W_V = torch.tensor_split(W, 3, dim=1)
-            W_Q = einops.rearrange(W_Q, "m (i h)->i h m", i=self.cfg["n_heads"])
-            W_K = einops.rearrange(W_K, "m (i h)->i h m", i=self.cfg["n_heads"])
-            W_V = einops.rearrange(W_V, "m (i h)->i h m", i=self.cfg["n_heads"])
+        This does NOT follow the PyTorch scheme, which as far as I can tell is super out of date but no one has gotten round to updating it?
+        https://github.com/pytorch/pytorch/issues/18182
+        
+        PyTorch Transformers are especially bad - TransformerEncoder initializes all layers to the exact same weights?! https://github.com/pytorch/pytorch/issues/72253
 
-            # Fold in layer norm weights
-            sd[f"blocks.{l}.attn.W_Q"] = W_Q * w_ln_attn
-            sd[f"blocks.{l}.attn.W_K"] = W_K * w_ln_attn
-            sd[f"blocks.{l}.attn.W_V"] = W_V * w_ln_attn
+        The best paper I've found on transformer initialization is the muP paper, but haven't integrated those ideas yet: https://arxiv.org/abs/2203.03466
+        """
+        
+        if self.cfg.seed is not None:
+            torch.manual_seed(self.cfg.seed)
+        
+        for name, param in self.named_parameters():
+            if "W_" in name:
+                nn.init.normal_(param, std=self.cfg.initializer_range)
+    
+    def load_and_process_state_dict(self, 
+                                    state_dict: Dict[str, torch.Tensor], 
+                                    fold_ln: bool=True, 
+                                    center_writing_weights: bool = True, 
+                                    center_unembed: bool = True,
+                                    move_dict_to_device: bool = True):
+        """Method to load a state dict into the model, and to apply processing to simplify it. The state dict is assumed to be in the EasyTransformer format.
+        
+        See fold_layer_norm for more details on the folding and centering.
 
-            b_ln = gpt2.transformer.h[l].ln_1.bias
-            qkv_bias = gpt2.transformer.h[l].attn.c_attn.bias
-            qkv_bias = einops.rearrange(
-                qkv_bias, "(qkv index head)->qkv index head", qkv=3, index=self.cfg["n_heads"], head=self.cfg["d_head"]
+        Args:
+            state_dict (dict): The state dict of the model, in EasyTransformer format
+            fold_ln (bool, optional): Whether to fold in the LayerNorm weights to the   
+                subsequent linear layer. This does not change the computation. Defaults to True.
+            center_writing_weights (bool, optional): Whether to center weights writing to the 
+                residual stream (ie set mean to be zero). Due to LayerNorm this doesn't change the computation. Defaults to True.
+            center_unembed (bool, optional): Whether to center W_U (ie set mean to be zero). 
+                Softmax is translation invariant so this doesn't affect log probs or loss, but does change logits. Defaults to True.
+            move_dict_to_device (bool, optional): Whether to move the state dict to the device of the model. Defaults to True.
+        """
+        if move_dict_to_device:
+            state_dict = {k: v.to(self.cfg.device) for k, v in state_dict.items()}
+        state_dict = self.fill_missing_keys(state_dict)
+        if fold_ln:
+            state_dict = self.fold_layer_norm(state_dict)
+        if center_writing_weights:
+            state_dict = self.center_writing_weights(state_dict)
+        if center_unembed:
+            state_dict = self.center_unembed(state_dict)
+        self.load_state_dict(state_dict)
+
+
+    def fill_missing_keys(self, state_dict):
+        """Takes in a state dict from a pretrained model, and fills in any missing keys with the default initialization.
+
+        This function is assumed to be run before weights are initialized.
+
+        Args:
+            state_dict (dict): State dict from a pretrained model
+
+        Returns:
+            dict: State dict with missing keys filled in
+        """
+        # Get the default state dict
+        default_state_dict = self.state_dict()
+        # Get the keys that are missing from the pretrained model
+        missing_keys = set(default_state_dict.keys()) - set(state_dict.keys())
+        # Fill in the missing keys with the default initialization
+        for key in missing_keys:
+            if 'hf_model' in key:
+                # Skip keys that are from the HuggingFace model, if loading from HF.
+                continue
+            if 'W_' in key:
+                logging.warning("Missing key for a weight matrix in pretrained, filled in with an empty tensor: {}".format(key))
+            state_dict[key] = default_state_dict[key]
+        return state_dict
+    
+    def fold_layer_norm(self, state_dict: Dict[str, torch.Tensor]):
+        """Takes in a state dict from a pretrained model, formatted to be consistent with EasyTransformer but with LayerNorm weights and biases. Folds these into the neighbouring weights. See EasyTransformerConfig for more details
+
+        Args:
+            state_dict (Dict[str, torch.Tensor]): State dict of pretrained model
+        """
+        for l in range(self.cfg.n_layers):
+            # Fold ln1 into attention - it's important to fold biases first, 
+            # since biases depend on weights but not vice versa
+            # The various indexing is just to broadcast ln.b and ln.w along every axis other than d_model. Each weight matrix right multiplies.
+            # To fold in the bias, we use the W_ matrix to map it to the hidden space of the layer, so we need to sum along axis -2, which is the residual stream space axis.
+            state_dict[f"blocks.{l}.attn.b_Q"] = state_dict[f"blocks.{l}.attn.b_Q"] + (state_dict[f"blocks.{l}.attn.W_Q"] * state_dict[f"blocks.{l}.ln1.b"][None, :, None]).sum(-2)
+            state_dict[f"blocks.{l}.attn.b_K"] = state_dict[f"blocks.{l}.attn.b_K"] + (state_dict[f"blocks.{l}.attn.W_K"] * state_dict[f"blocks.{l}.ln1.b"][None, :, None]).sum(-2)
+            state_dict[f"blocks.{l}.attn.b_V"] = state_dict[f"blocks.{l}.attn.b_V"] + (state_dict[f"blocks.{l}.attn.W_V"] * state_dict[f"blocks.{l}.ln1.b"][None, :, None]).sum(-2)
+            
+            state_dict[f"blocks.{l}.attn.W_Q"] = state_dict[f"blocks.{l}.attn.W_Q"] * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
+            state_dict[f"blocks.{l}.attn.W_K"] = state_dict[f"blocks.{l}.attn.W_K"] * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
+            state_dict[f"blocks.{l}.attn.W_V"] = state_dict[f"blocks.{l}.attn.W_V"] * state_dict[f"blocks.{l}.ln1.w"][None, :, None]
+            
+            
+            # Fold ln2 into MLP
+            state_dict[f"blocks.{l}.mlp.b_in"] = state_dict[f"blocks.{l}.mlp.b_in"] + (state_dict[f"blocks.{l}.mlp.W_in"] * state_dict[f"blocks.{l}.ln2.b"][:, None]).sum(-2)
+            state_dict[f"blocks.{l}.mlp.W_in"] = state_dict[f"blocks.{l}.mlp.W_in"] * state_dict[f"blocks.{l}.ln2.w"][:, None]
+            del state_dict[f"blocks.{l}.ln1.w"], state_dict[f"blocks.{l}.ln1.b"], state_dict[f"blocks.{l}.ln2.w"], state_dict[f"blocks.{l}.ln2.b"]
+        # Fold ln_final into Unembed
+        # We assume there is no existing bias in the unembed layer
+        state_dict[f"unembed.b_U"] = state_dict[f"unembed.b_U"] + (state_dict[f"unembed.W_U"] * state_dict[f"ln_final.b"][:, None]).sum(dim=-2)
+        state_dict[f"unembed.W_U"] = state_dict[f"unembed.W_U"] * state_dict[f"ln_final.w"][:, None]
+        del state_dict[f"ln_final.w"], state_dict[f"ln_final.b"]
+        return state_dict
+    
+    
+    def center_writing_weights(self, state_dict: Dict[str, torch.Tensor]):
+        """Centers the weights of the model that write to the residual stream - W_out, W_E, W_pos and W_out. This is done by subtracting the mean of the weights from the weights themselves. This is done in-place. See fold_layer_norm for more details.
+        """
+        state_dict['embed.W_E'] = state_dict['embed.W_E'] - state_dict['embed.W_E'].mean(-1, keepdim=True)
+        state_dict['pos_embed.W_pos'] = state_dict['pos_embed.W_pos'] - state_dict['pos_embed.W_pos'].mean(-1, keepdim=True)
+        for l in range(self.cfg.n_layers):
+            state_dict[f'blocks.{l}.attn.W_O'] = state_dict[f'blocks.{l}.attn.W_O'] - state_dict[f'blocks.{l}.attn.W_O'].mean(-1, keepdim=True) # W_O is [head_index, d_model, d_head]
+            state_dict[f'blocks.{l}.attn.b_O'] = state_dict[f'blocks.{l}.attn.b_O'] - state_dict[f'blocks.{l}.attn.b_O'].mean() # b_O is [d_model]
+            state_dict[f'blocks.{l}.mlp.W_out'] = state_dict[f'blocks.{l}.mlp.W_out'] - state_dict[f'blocks.{l}.mlp.W_out'].mean(-1, keepdim=True)
+            state_dict[f'blocks.{l}.mlp.b_out'] = state_dict[f'blocks.{l}.mlp.b_out'] - state_dict[f'blocks.{l}.mlp.b_out'].mean()
+        return state_dict
+    
+    def center_unembed(self, state_dict: Dict[str, torch.Tensor]):
+        """Centers the unembedding weights W_U. This is done by subtracting the mean of the weights from the weights themselves. This is done in-place. As softmax is translation invariant, this changes the logits but not the log probs, and makes the model logits (slightly) more interpretable - when trying to understand how components contribute to the logits, we'll be less misled by components that just add something to every logit.
+        """
+        state_dict['unembed.W_U'] = state_dict['unembed.W_U'] - state_dict['unembed.W_U'].mean(-1, keepdim=True)
+        state_dict['unembed.b_U'] = state_dict['unembed.b_U'] - state_dict['unembed.b_U'].mean()
+        return state_dict
+    
+    def set_use_attn_result(self, use_attn_result):
+        """
+        Toggles whether to explicitly calculate and expose the result for each attention head - useful for interpretability but can easily burn through GPU memory.
+        """
+        self.cfg.use_attn_result = use_attn_result
+        
+    @torch.inference_mode()
+    def generate(
+        self,
+        input: Union[str, torch.Tensor] = "",
+        max_new_tokens: int = 10,
+        stop_at_eos: bool = True,
+        eos_token_id: Optional[int] = None,
+        do_sample: bool = False,
+        top_k: Optional[int] = None,
+        top_p: Optional[float] = None,
+        temperature: float = 1.0,
+        freq_penalty: float = 0.0,
+        num_return_sequences: int = 1,
+        use_past_kv_cache: bool = True,
+        prepend_bos = True,
+        return_type: Optional[str] = "input",
+    ):
+        """
+        Sample tokens from the model until the model outputs eos_token or max_new_tokens is reached.
+
+        To avoid fiddling with ragged tensors, if we input a batch of text and some sequences finish (by producing an EOT token), we keep running the model on the entire batch, but throw away the output for a finished sequence and just keep adding EOTs to pad.
+
+        This supports entering a single string, but not a list of strings - if the strings don't tokenize to exactly the same length, this gets messy. If that functionality is needed, convert them to a batch of tokens and input that instead.
+
+        Args:
+            input (int): Either a batch of tokens ([batch, pos]) or a text string (this will be converted to a batch of tokens with batch size 1)
+            max_new_tokens (int): Maximum number of tokens to generate
+            stop_at_eos (bool): If True, stop generating tokens when the model outputs eos_token
+            eos_token_id (int, *optional*): The token ID to use for end of sentence. If None, use the tokenizer's eos_token_id - required if using stop_at_eos
+            do_sample (bool): If True, sample from the model's output distribution. Otherwise, use greedy search (take the max logit each time).
+            top_k (int): Number of tokens to sample from. If None, sample from all tokens
+            top_p (float): Probability mass to sample from. If 1.0, sample from all tokens. If <1.0, we take the top tokens with cumulative probability >= top_p
+            temperature (float): Temperature for sampling. Higher values will make the model more random (limit of temp -> 0 is just taking the top token, limit of temp -> inf is sampling from a uniform distribution)
+            freq_penalty (float): Frequency penalty for sampling - how much to penalise previous tokens. Higher values will make the model more random
+            use_past_kv_cache (bool): If True, create and use cache to speed up generation
+            prepend_bos (bool): If True, prepend the model's bos_token_id to the input, if it's a string. Irrelevant if input is a tensor.
+            return_type (str, *optional*): The type of the output to return - either a string (str), a tensor of tokens (tensor) or whatever the format of the input was (input). 
+        Returns:
+            outputs (torch.Tensor): [batch, pos + max_new_tokens], generated sequence of new tokens - by default returns same type as input
+        """
+        if type(input) == str:
+            # If text, convert to tokens (batch_size=1)
+            assert (
+                self.tokenizer is not None
+            ), "Must provide a tokenizer if passing a string to the model"
+            tokens = self.to_tokens(input, prepend_bos=prepend_bos)
+        else:
+            tokens = input
+
+        if return_type == "input":
+            if type(input) == str:
+                return_type = "str"
+            else:
+                return_type = "tensor"
+
+        assert isinstance(tokens, torch.Tensor)
+        batch_size, ctx_length = tokens.shape
+        tokens = tokens.to(self.cfg.device)
+        if use_past_kv_cache:
+            past_kv_cache = EasyTransformerKeyValueCache.init_cache(self.cfg, self.cfg.device, batch_size)
+        else:
+            past_kv_cache = None
+
+        if stop_at_eos and eos_token_id is None:
+            assert (
+                self.tokenizer is not None and self.tokenizer.eos_token_id is not None
+            ), "Must pass a eos_token_id if stop_at_eos is True and tokenizer is None or has no eos_token_id"
+
+            eos_token_id = self.tokenizer.eos_token_id
+            
+            # An array to track which sequences in the batch have finished.
+            finished_sequences = torch.zeros(batch_size, dtype=torch.bool, device=self.cfg.device)
+        
+        # Currently nothing in EasyTransformer changes with eval, but this is here in case that changes in the future
+        self.eval()
+        for index in tqdm.tqdm(range(max_new_tokens)):
+            # While generating, we keep generating logits, throw away all but the final logits, and then use those logits to sample from the distribution
+            # We keep adding the sampled tokens to the end of tokens.
+            if use_past_kv_cache:
+                # We just take the final tokens, as a [batch, 1] tensor
+                if index>0:
+                    logits = self.forward(tokens[:, -1:], return_type="logits", past_kv_cache=past_kv_cache)
+                else:
+                    logits = self.forward(tokens, return_type="logits", past_kv_cache=past_kv_cache)
+
+            else:
+                # We input the entire sequence, as a [batch, pos] tensor, since we aren't using the cache
+                logits = self.forward(tokens, return_type="logits")
+            final_logits = logits[:, -1, :]
+
+            sampled_tokens = sample_logits(
+                final_logits,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature,
+                freq_penalty=freq_penalty,
+                tokens=tokens,
             )
-            # Fold in layer norm biases
-            sd[f"blocks.{l}.attn.b_Q"] = W_Q @ b_ln + qkv_bias[0]
-            sd[f"blocks.{l}.attn.b_K"] = W_K @ b_ln + qkv_bias[1]
-            sd[f"blocks.{l}.attn.b_V"] = W_V @ b_ln + qkv_bias[2]
+            
+            if stop_at_eos:
+                # For all unfinished sequences, add on the next token. If a sequence finished, we throw away the generated token and instead add an EOS token to pad.
+                sampled_tokens[finished_sequences] = eos_token_id
+                finished_sequences.logical_or_(sampled_tokens == eos_token_id)
+            
+            tokens = torch.cat([tokens, sampled_tokens.unsqueeze(-1)], dim=-1)
 
-            W_O = gpt2.transformer.h[l].attn.c_proj.weight
-            W_O = einops.rearrange(W_O, "(i h) m->i m h", i=self.cfg["n_heads"])
-            sd[f"blocks.{l}.attn.W_O"] = W_O
-            sd[f"blocks.{l}.attn.b_O"] = gpt2.transformer.h[l].attn.c_proj.bias
+            if stop_at_eos and finished_sequences.all():
+                break
+        
+        if return_type == "str":
+            if prepend_bos:
+                # If we prepended a BOS token, remove it when returning output.
+                return self.tokenizer.decode(tokens[0, 1:])
+            else:
+                return self.tokenizer.decode(tokens[0])
 
-            W_in = gpt2.transformer.h[l].mlp.c_fc.weight.T
-            W_out = gpt2.transformer.h[l].mlp.c_proj.weight.T
-            # Fold in layer norm weights
-            W_in_adj = gpt2.transformer.h[l].ln_2.weight[None, :] * W_in
-            sd[f"blocks.{l}.mlp.W_in"] = W_in_adj
-            # Fold in layer norm biases
-            sd[f"blocks.{l}.mlp.b_in"] = gpt2.transformer.h[l].mlp.c_fc.bias + (W_in @ gpt2.transformer.h[l].ln_2.bias)
-            sd[f"blocks.{l}.mlp.W_out"] = W_out
-            sd[f"blocks.{l}.mlp.b_out"] = gpt2.transformer.h[l].mlp.c_proj.bias
-        W_U = gpt2.lm_head.weight
-        # Fold in layer norm weights
-        sd["unembed.W_U"] = gpt2.transformer.ln_f.weight[None, :] * W_U
-        # Fold in layer norm biases
-        sd["unembed.b_U"] = gpt2.lm_head.weight @ gpt2.transformer.ln_f.bias
-        self.load_state_dict(sd)
+        else:
+            return tokens
 
-    def load_neo_weights(self, neo):
-        sd = self.state_dict()
+    # def greedy_search(
+    #     self,
+    #     tokens: torch.Tensor,
+    #     max_new_tokens: int,
+    #     stop_at_eos: bool = True,
+    #     pad_token_id: Optional[int] = None,
+    #     eos_token_id: Optional[int] = None,
+    #     past_kv_cache: Optional[EasyTransformerKeyValueCache] = None,
+    #     return_type: Optional[str] = None,
+    # ):
+    #     """
+    #     Greedily sample tokens from the model until the model outputs eos_token or max_new_tokens is reached.
+    #     Args:
+    #         tokens (torch.Tensor): A batch of tokens ([batch, pos])
+    #         max_new_tokens (int): Maximum number of tokens to generate
+    #         stop_at_eos (bool): If True, stop generating tokens when the model outputs eos_token
+    #         pad_token_id (int, *optional*): The token ID to use for padding. If None, use the tokenizer's pad_token_id - required if using stop_at_eos
+    #         eos_token_id (int, *optional*): The token ID to use for end of sentence. If None, use the tokenizer's eos_token_id - required if using stop_at_eos
+    #         past_kv_cache (EasyTransformerKeyValueCache, *optional*): Cache to use for past keys and values for the model. If None, no cache is used
+    #         return_type (str, *optional*): The type of the output to return - either a string (str), a list of strings (list), or a tensor of tokens (tensor). If None, defaults to tensor.
+    #     Returns:
+    #         outputs (torch.Tensor): [batch, pos + max_new_tokens], generated sequence of new tokens
+    #     """
+    #     B, S = tokens.shape
+    #     outputs = tokens
+    #     unfinished_sequences = tokens.new(tokens.shape[0]).fill_(1)
 
-        sd["embed.W_E"] = neo.transformer.wte.weight.T
-        sd["pos_embed.W_pos"] = neo.transformer.wpe.weight.T
+    #     if stop_at_eos and pad_token_id is None:
+    #         assert (
+    #             self.tokenizer is not None and self.tokenizer.pad_token_id is not None
+    #         ), "Must pass a pad_token_id if stop_at_eos is True and tokenizer is None or has no pad_token_id"
+    #         pad_token_id = self.tokenizer.pad_token_id
+    #     if stop_at_eos and eos_token_id is None:
+    #         assert (
+    #             self.tokenizer is not None and self.tokenizer.eos_token_id is not None
+    #         ), "Must pass a eos_token_id if stop_at_eos is True and tokenizer is None or has no eos_token_id"
+    #         eos_token_id = self.tokenizer.eos_token_id
 
-        for l in range(self.cfg["n_layers"]):
-            w_ln_attn = neo.transformer.h[l].ln_1.weight
-            W_Q = neo.transformer.h[l].attn.attention.q_proj.weight
-            W_K = neo.transformer.h[l].attn.attention.k_proj.weight
-            W_V = neo.transformer.h[l].attn.attention.v_proj.weight
-            W_Q = einops.rearrange(W_Q, "(i h) m->i h m", i=self.cfg["n_heads"])
-            W_K = einops.rearrange(W_K, "(i h) m->i h m", i=self.cfg["n_heads"])
-            W_V = einops.rearrange(W_V, "(i h) m->i h m", i=self.cfg["n_heads"])
+    #     for _ in tqdm.tqdm(range(max_new_tokens)):
+    #         logits = self(tokens, return_type="logits", past_kv_cache=past_kv_cache)
+    #         next_tokens = torch.argmax(logits[:, -1, :], dim=-1)
+    #         if stop_at_eos:
+    #             next_tokens = next_tokens * unfinished_sequences + pad_token_id * (
+    #                 1 - unfinished_sequences
+    #             )
+    #             unfinished_sequences.mul_((next_tokens != eos_token_id).long())
+    #         outputs = torch.cat([outputs, next_tokens.unsqueeze(-1)], dim=-1)
+    #         if past_kv_cache is not None:
+    #             tokens = next_tokens.unsqueeze(-1)
+    #         else:
+    #             tokens = outputs
 
-            sd[f"blocks.{l}.attn.W_Q"] = W_Q * w_ln_attn
-            sd[f"blocks.{l}.attn.W_K"] = W_K * w_ln_attn
-            sd[f"blocks.{l}.attn.W_V"] = W_V * w_ln_attn
+    #     if return_type is not None and return_type == "str":
+    #         assert self.tokenizer is not None
+    #         outputs = self.tokenizer.batch_decode(outputs)[0]
+    #     elif return_type is not None and return_type == "list":
+    #         assert self.tokenizer is not None
+    #         outputs = self.tokenizer.batch_decode(outputs)
 
-            b_ln = neo.transformer.h[l].ln_1.bias
-            sd[f"blocks.{l}.attn.b_Q"] = W_Q @ b_ln
-            sd[f"blocks.{l}.attn.b_K"] = W_K @ b_ln
-            sd[f"blocks.{l}.attn.b_V"] = W_V @ b_ln
+    #     return outputs
 
-            W_O = neo.transformer.h[l].attn.attention.out_proj.weight
-            W_O = einops.rearrange(W_O, "m (i h)->i m h", i=self.cfg["n_heads"])
-            sd[f"blocks.{l}.attn.W_O"] = W_O
-            sd[f"blocks.{l}.attn.b_O"] = neo.transformer.h[l].attn.attention.out_proj.bias
+    def sample(
+        self,
+        tokens: torch.Tensor,
+        max_new_tokens: int,
+        stop_at_eos: bool = True,
+        eos_token_id: Optional[int] = None,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        top_p: float = 1.0,
+        freq_penalty: float = 0.0,
+        cache: Optional[EasyTransformerKeyValueCache] = None,
+        return_type: Optional[str] = None,
+    ):
+        """
+        Sample tokens from the model until the model outputs eos_token or max_new_tokens is reached.
 
-            W_in = neo.transformer.h[l].mlp.c_fc.weight
-            W_out = neo.transformer.h[l].mlp.c_proj.weight
-            W_in_adj = neo.transformer.h[l].ln_2.weight[None, :] * W_in
-            sd[f"blocks.{l}.mlp.W_in"] = W_in_adj
-            sd[f"blocks.{l}.mlp.b_in"] = neo.transformer.h[l].mlp.c_fc.bias + (W_in @ neo.transformer.h[l].ln_2.bias)
-            sd[f"blocks.{l}.mlp.W_out"] = W_out
-            sd[f"blocks.{l}.mlp.b_out"] = neo.transformer.h[l].mlp.c_proj.bias
-        W_U = neo.lm_head.weight
-        sd["unembed.W_U"] = neo.transformer.ln_f.weight[None, :] * W_U
-        sd["unembed.b_U"] = neo.lm_head.weight @ neo.transformer.ln_f.bias
-        self.load_state_dict(sd)
+        If temperature == 0.0, greedy search is used instead.
 
-    def load_neox_weights(self, neox):
-        raise NotImplementedError
+        Args:
+            tokens (torch.Tensor): A batch of tokens ([batch, pos])
+            max_new_tokens (int): Maximum number of tokens to generate
+            stop_at_eos (bool): If True, stop generating tokens when the model outputs eos_token
+            pad_token_id (int, *optional*): The token ID to use for padding. If None, use the tokenizer's pad_token_id - required if using stop_at_eos
+            eos_token_id (int, *optional*): The token ID to use for end of sentence. If None, use the tokenizer's eos_token_id - required if using stop_at_eos
+            top_k (int): Number of tokens to sample from. If None, sample from all tokens
+            top_p (float): Probability mass to sample from. If 1.0, sample from all tokens
+            temperature (float): Temperature for sampling. Higher values will make the model more random
+            freq_penalty (float): Frequency penalty for sampling. Higher values will make the model more random
+            cache (EasyTransformerKeyValueCache, *optional*): Cache to use for the model. If None, no cache is used
+            return_type (str, *optional*): If "str", return a string. If "list", return a list of strings. If None, return a tensor
+        Returns:
+            outputs (torch.Tensor): [batch, pos + max_new_tokens], generated sequence of new tokens
+        """
+        B, S = tokens.shape
+        outputs = tokens
 
-    def load_gptj_weights(self, gptj):
-        raise NotImplementedError
+        if stop_at_eos and pad_token_id is None:
+            assert (
+                self.tokenizer is not None and self.tokenizer.pad_token_id is not None
+            ), "Must pass a pad_token_id if stop_at_eos is True and tokenizer is None or has no pad_token_id"
+            pad_token_id = self.tokenizer.pad_token_id
+        if stop_at_eos and eos_token_id is None:
+            assert (
+                self.tokenizer is not None and self.tokenizer.eos_token_id is not None
+            ), "Must pass a eos_token_id if stop_at_eos is True and tokenizer is None or has no eos_token_id"
+            eos_token_id = self.tokenizer.eos_token_id
 
-    def load_opt_weights(self, opt):
-        sd = self.state_dict()
 
-        sd["embed.W_E"] = opt.model.decoder.embed_tokens.weight.T
-        sd["pos_embed.W_pos"] = opt.model.decoder.embed_positions.weight.T[:, 2:]
+        if return_type is not None and return_type == "str":
+            assert self.tokenizer is not None
+            outputs = self.tokenizer.batch_decode(outputs)[0]
+        elif return_type is not None and return_type == "list":
+            assert self.tokenizer is not None
+            outputs = self.tokenizer.batch_decode(outputs)
 
-        for l in range(self.cfg["n_layers"]):
-            w_ln_attn = opt.model.decoder.layers[l].self_attn_layer_norm.weight
-            W_Q = opt.model.decoder.layers[l].self_attn.q_proj.weight
-            W_K = opt.model.decoder.layers[l].self_attn.k_proj.weight
-            W_V = opt.model.decoder.layers[l].self_attn.v_proj.weight
-            W_Q = einops.rearrange(W_Q, "(index d_head) d_model->index d_head d_model", index=self.cfg["n_heads"])
-            W_K = einops.rearrange(W_K, "(index d_head) d_model->index d_head d_model", index=self.cfg["n_heads"])
-            W_V = einops.rearrange(W_V, "(index d_head) d_model->index d_head d_model", index=self.cfg["n_heads"])
-
-            sd[f"blocks.{l}.attn.W_Q"] = W_Q * w_ln_attn
-            sd[f"blocks.{l}.attn.W_K"] = W_K * w_ln_attn
-            sd[f"blocks.{l}.attn.W_V"] = W_V * w_ln_attn
-
-            b_ln = opt.model.decoder.layers[l].self_attn_layer_norm.bias
-            q_bias = einops.rearrange(
-                opt.model.decoder.layers[l].self_attn.q_proj.bias,
-                "(head_index d_head)->head_index d_head",
-                head_index=self.cfg["n_heads"],
-                d_head=self.cfg["d_head"],
-            )
-            k_bias = einops.rearrange(
-                opt.model.decoder.layers[l].self_attn.k_proj.bias,
-                "(head_index d_head)->head_index d_head",
-                head_index=self.cfg["n_heads"],
-                d_head=self.cfg["d_head"],
-            )
-            v_bias = einops.rearrange(
-                opt.model.decoder.layers[l].self_attn.v_proj.bias,
-                "(head_index d_head)->head_index d_head",
-                head_index=self.cfg["n_heads"],
-                d_head=self.cfg["d_head"],
-            )
-
-            sd[f"blocks.{l}.attn.b_Q"] = W_Q @ b_ln + q_bias
-            sd[f"blocks.{l}.attn.b_K"] = W_K @ b_ln + k_bias
-            sd[f"blocks.{l}.attn.b_V"] = W_V @ b_ln + v_bias
-
-            W_O = opt.model.decoder.layers[l].self_attn.out_proj.weight
-            W_O = einops.rearrange(W_O, "d_model (index d_head)->index d_model d_head", index=self.cfg["n_heads"])
-            sd[f"blocks.{l}.attn.W_O"] = W_O
-            sd[f"blocks.{l}.attn.b_O"] = opt.model.decoder.layers[l].self_attn.out_proj.bias
-
-            W_in = opt.model.decoder.layers[l].fc1.weight
-            W_out = opt.model.decoder.layers[l].fc2.weight
-            W_in_adj = opt.model.decoder.layers[l].final_layer_norm.weight[None, :] * W_in
-            sd[f"blocks.{l}.mlp.W_in"] = W_in_adj
-            sd[f"blocks.{l}.mlp.b_in"] = opt.model.decoder.layers[l].fc1.bias + (
-                W_in @ opt.model.decoder.layers[l].final_layer_norm.bias
-            )
-            sd[f"blocks.{l}.mlp.W_out"] = W_out
-            sd[f"blocks.{l}.mlp.b_out"] = opt.model.decoder.layers[l].fc2.bias
-        W_U = opt.lm_head.weight
-        sd["unembed.W_U"] = opt.model.decoder.final_layer_norm.weight[None, :] * W_U
-        sd["unembed.b_U"] = W_U @ opt.model.decoder.final_layer_norm.bias
-        self.load_state_dict(sd)
-
-    def load_bloom_weights(self, bloom):
-        raise NotImplementedError
+        return outputs
