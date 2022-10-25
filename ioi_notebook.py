@@ -3150,7 +3150,5 @@ for idx, head_set in enumerate(
         )
         model.add_hook(*hook)
 
-    # print(f"{head_set=}, IO S S2, {att_probs=}")  # print("IO S S2")
-    cur_logit_diff = logit_diff(model, ioi_dataset)
-    # cur_io_probs = probs(model, ioi_dataset)
+    cur_logit_diff = logit_diff(model, late_dataset)
     print(f"{idx=} {cur_logit_diff=} ")  # {cur_io_probs=}")
