@@ -133,7 +133,7 @@ if False:
         model_name, use_attn_result=True
     )  # use_attn_result adds a hook blocks.{lay}.attn.hook_result that is before adding the biais of the attention layer
 if True:
-    model = EasyTransformer.from_pretrained("gpt2").cuda()
+    model = EasyTransformer.from_pretrained("gpt2", center_writing_weights=False).cuda()
     # model = EasyTransformer.from_pretrained("EleutherAI/gpt-neo-125M").cuda()
     # model = EasyTransformer.from_pretrained("gpt2-medium").cuda()
     # model = EasyTransformer.from_pretrained(
