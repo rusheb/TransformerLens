@@ -1,3 +1,4 @@
+from copy import deepcopy
 import io
 from typing import Union, List
 from site import PREFIXES
@@ -198,8 +199,9 @@ TEMPLATES_VARIED_MIDDLE = [
 ABBA_TEMPLATES = BABA_TEMPLATES[:]
 ABBA_LATE_IOS = BABA_LATE_IOS[:]
 ABBA_EARLY_IOS = BABA_EARLY_IOS[:]
+ABBA_LONG_TEMPLATES = deepcopy(BABA_LONG_TEMPLATES)
 
-for TEMPLATES in [ABBA_TEMPLATES, ABBA_LATE_IOS, ABBA_EARLY_IOS]:
+for TEMPLATES in [ABBA_TEMPLATES, ABBA_LATE_IOS, ABBA_EARLY_IOS, ABBA_LONG_TEMPLATES]:
     for i in range(len(TEMPLATES)):
         first_clause = True
         for j in range(1, len(TEMPLATES[i]) - 1):

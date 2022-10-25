@@ -3067,15 +3067,13 @@ for i in range(1, 12):
     model.add_hook(*hooks[i])
 cur_logit_diff = logit_diff(model, ioi_dataset)
 print(f"Layer {i} logit diff: {cur_logit_diff} {default_logit_diff}")
-
-# %%
 #%% [markdown] weird patching
 
-from ioi_dataset import BABA_LONG_TEMPLATES
+from ioi_dataset import BABA_LONG_TEMPLATES, ABBA_LONG_TEMPLATES, ABBA_TEMPLATES
 
-early_dataset = IOIDataset(prompt_type=BABA_TEMPLATES, N=100)
+early_dataset = IOIDataset(prompt_type=BABA_TEMPLATES + ABBA_TEMPLATES, N=100)
 late_dataset = IOIDataset.construct_from_ioi_prompts_metadata(
-    templates=BABA_LONG_TEMPLATES,
+    templates=BABA_LONG_TEMPLATES + ABBA_LONG_TEMPLATES,
     ioi_prompts_data=deepcopy(early_dataset.ioi_prompts),
     N=100,
 )
@@ -3102,7 +3100,7 @@ config = PatchingConfig(
     cache_act=True,
     verbose=False,
     patch_fn=patch_s2,
-    layers=(0, 8),
+    layers=(0, 11),
 )  # we stop at layer "LAYER" because it's useless to patch after layer 9 if what we measure is attention of a head at layer 9.
 metric = ExperimentMetric(
     logit_diff,
@@ -3150,5 +3148,6 @@ for idx, head_set in enumerate(
         )
         model.add_hook(*hook)
 
-    cur_logit_diff = logit_diff(model, late_dataset)
-    print(f"{idx=} {cur_logit_diff=} ")  # {cur_io_probs=}")
+    cur_logit_diff = logit_diff(model, early_dataset)
+    cur_probs = probs(model, early_dataset)
+    print(f"{idx=} {cur_logit_diff=} {cur_probs=}")  # {cur_io_probs=}")
