@@ -17,12 +17,13 @@ from transformers import (
 )
 
 from transformer_lens import HookedTransformerConfig, FactoredMatrix
-from transformer_lens.components.components_old import TransformerBlock, RMSNorm
+from transformer_lens.components.components_old import RMSNorm
 from transformer_lens.components.embed import Embed, Unembed
 from transformer_lens.components.layer_norm import LayerNorm
 from transformer_lens.components.layer_norm_pre import LayerNormPre
 from transformer_lens.components.pos_embed import PosEmbed
 from transformer_lens.components.rms_norm_pre import RMSNormPre
+from transformer_lens.components.transformer_block import TransformerBlock
 from transformer_lens.hook_points import HookedRootModule, HookPoint
 from transformer_lens.ActivationCache import ActivationCache
 # Note - activation cache is used with run_with_cache, past_key_value_caching is used for generation.
