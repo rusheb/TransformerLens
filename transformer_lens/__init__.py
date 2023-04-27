@@ -8,6 +8,7 @@ from .past_key_value_caching import (
 from .HookedTransformerConfig import HookedTransformerConfig
 from .FactoredMatrix import FactoredMatrix
 from .ActivationCache import ActivationCache
+from .components import *
 from .HookedTransformer import HookedTransformer
 from . import head_detector
 from . import loading_from_pretrained as loading

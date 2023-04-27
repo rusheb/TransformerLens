@@ -7,12 +7,15 @@ import torch.nn as nn
 from jaxtyping import Float
 
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.components.attention import Attention
-from transformer_lens.components.rms_norm import RMSNorm
-from transformer_lens.components.layer_norm import LayerNorm
-from transformer_lens.components.layer_norm_pre import LayerNormPre
-from transformer_lens.components.mlp import GatedMLP, MLP
-from transformer_lens.components.rms_norm_pre import RMSNormPre
+from transformer_lens.components import (
+    Attention,
+    RMSNorm,
+    LayerNorm,
+    LayerNormPre,
+    MLP,
+    RMSNormPre,
+    GatedMLP
+)
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.past_key_value_caching import (
     HookedTransformerKeyValueCacheEntry,
