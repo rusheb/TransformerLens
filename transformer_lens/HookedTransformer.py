@@ -17,7 +17,7 @@ from transformers import (
 )
 
 from transformer_lens import HookedTransformerConfig, FactoredMatrix
-from transformer_lens.components.components_old import RMSNorm
+from transformer_lens.components.rms_norm import RMSNorm
 from transformer_lens.components.embed import Embed, Unembed
 from transformer_lens.components.layer_norm import LayerNorm
 from transformer_lens.components.layer_norm_pre import LayerNormPre

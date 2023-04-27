@@ -8,7 +8,7 @@ from jaxtyping import Float
 
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.components.attention import Attention
-from transformer_lens.components.components_old import RMSNorm
+from transformer_lens.components.rms_norm import RMSNorm
 from transformer_lens.components.layer_norm import LayerNorm
 from transformer_lens.components.layer_norm_pre import LayerNormPre
 from transformer_lens.components.mlp import GatedMLP, MLP

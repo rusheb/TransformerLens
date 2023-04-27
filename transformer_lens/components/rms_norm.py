@@ -1,31 +1,11 @@
-from typing import Union, Dict, Optional, Tuple
+from typing import Union, Dict, Optional
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import einops
-import logging
-from jaxtyping import Float, Int
+from jaxtyping import Float
 
-from functools import *
-
-from transformer_lens.components.attention import Attention
-from transformer_lens.components.layer_norm import LayerNorm
-from transformer_lens.components.layer_norm_pre import LayerNormPre
-from transformer_lens.components.rms_norm_pre import RMSNormPre
-from transformer_lens.hook_points import HookPoint
-from transformer_lens.utils import gelu_new, solu, gelu_fast
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.FactoredMatrix import FactoredMatrix
-
-from fancy_einsum import einsum
-
-from transformer_lens.past_key_value_caching import (
-    HookedTransformerKeyValueCacheEntry,
-)
-
-
-
+from transformer_lens.hook_points import HookPoint
 
 
 class RMSNorm(nn.Module):
