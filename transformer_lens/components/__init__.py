@@ -1,5 +1,4 @@
 from .components_old import (
-    PosEmbed,
     MLP,
     GatedMLP,
     RMSNormPre,
@@ -10,6 +9,7 @@ from .components_old import (
     TransformerBlock,
 )
 from .embed import Embed, Unembed
+from .pos_embed import PosEmbed
 
 __all__ = [
     "PosEmbed",
