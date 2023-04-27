@@ -5,7 +5,7 @@ from .past_key_value_caching import (
     HookedTransformerKeyValueCache,
     HookedTransformerKeyValueCacheEntry,
 )
-from .tl_components import components
+from .components import *
 from .HookedTransformerConfig import HookedTransformerConfig
 from .FactoredMatrix import FactoredMatrix
 from .ActivationCache import ActivationCache

@@ -24,7 +24,7 @@ from transformer_lens.past_key_value_caching import (
     HookedTransformerKeyValueCache,
 )
 
-from transformer_lens.tl_components import *
+from transformer_lens.components import *
 import transformer_lens.loading_from_pretrained as loading
 import transformer_lens.utils as utils
 from transformer_lens.utilities import devices
