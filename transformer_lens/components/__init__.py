@@ -1,6 +1,5 @@
 from .components_old import (
     PosEmbed,
-    Embed,
     MLP,
     GatedMLP,
     RMSNormPre,
@@ -9,8 +8,8 @@ from .components_old import (
     LayerNorm,
     Attention,
     TransformerBlock,
-    Unembed,
 )
+from .embed import Embed, Unembed
 
 __all__ = [
     "PosEmbed",
