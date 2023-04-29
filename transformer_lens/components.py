@@ -98,6 +98,46 @@ class PosEmbed(nn.Module):
         )  # [batch, pos, d_model]
         return broadcast_pos_embed.clone()
 
+class TokenTypeEmbed(nn.Module):
+    def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
+        super().__init__()
+        if isinstance(cfg, Dict):
+            cfg = HookedEncoderConfig.from_dict(cfg)
+        self.cfg = cfg
+        self.W_token_type = nn.Parameter(torch.empty(2, self.cfg.d_model))
+
+    def forward(self, token_type_ids: Int[torch.Tensor, "batch pos"]):
+        # TODO: should this method take the tokens rather than the token_type_ids?
+        return self.W_token_type[token_type_ids, :]
+
+
+class BertEmbed(nn.Module):
+    def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
+        super().__init__()
+        if isinstance(cfg, Dict):
+            cfg = HookedEncoderConfig.from_dict(cfg)
+        self.cfg = cfg
+        self.word_embeddings = Embed(cfg)
+        self.position_embeddings = PosEmbed(cfg)
+        self.token_type_embeddings = TokenTypeEmbed(cfg)
+        self.layer_norm = LayerNorm(cfg)
+
+    def forward(self, input_ids, token_type_ids=None):
+        base_index_id = torch.arange(input_ids.shape[1], device=input_ids.device)
+        index_ids = einops.repeat(
+            base_index_id, "seq -> batch seq", batch=input_ids.shape[0]
+        )
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+
+        word_embeddings_out = self.word_embeddings(input_ids)
+        position_embeddings_out = self.position_embeddings(index_ids)
+        token_type_embeddings_out = self.token_type_embeddings(token_type_ids)
+
+        embeddings_out = word_embeddings_out + position_embeddings_out + token_type_embeddings_out
+        layer_norm_out = self.layer_norm(embeddings_out)
+        return layer_norm_out
+
 
 # LayerNormPre
 # I fold the LayerNorm weights and biases into later weights and biases.
