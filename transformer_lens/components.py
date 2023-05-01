@@ -75,10 +75,10 @@ class Unembed(nn.Module):
 
 # Positional Embeddings
 class PosEmbed(nn.Module):
-    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
+    def __init__(self, cfg: Union[Dict, TransformerLensConfig]):
         super().__init__()
         if isinstance(cfg, Dict):
-            cfg = HookedTransformerConfig.from_dict(cfg)
+            cfg = TransformerLensConfig.from_dict(cfg)
         self.cfg = cfg
         self.W_pos = nn.Parameter(torch.empty(self.cfg.n_ctx, self.cfg.d_model))
 
