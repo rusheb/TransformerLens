@@ -9,9 +9,13 @@ class HookedEncoderConfig(TransformerLensConfig):
     """
     Configuration class to store the configuration of a HookedEncoder model.
     """
+
     d_model: int
     n_ctx: int
     d_vocab: int
+    n_heads: int
+    d_head: int
+    use_attn_result: bool = True
     eps: float = 1e-12
 
     model_type: str = "hooked_encoder"

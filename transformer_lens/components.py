@@ -14,8 +14,7 @@ from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookPoint
 from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
-from transformer_lens.past_key_value_caching import \
-    HookedTransformerKeyValueCacheEntry
+from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCacheEntry
 from transformer_lens.TransformerLensConfig import TransformerLensConfig
 from transformer_lens.utils import gelu_fast, gelu_new, solu
 
@@ -28,6 +27,7 @@ def config_from_dict(cfg: Dict) -> TransformerLensConfig:
         return HookedEncoderConfig.from_dict(cfg)
     else:
         raise ValueError(f"Unknown model_type: {model_type}")
+
 
 # Embed & Unembed
 class Embed(nn.Module):
@@ -58,7 +58,9 @@ class Unembed(nn.Module):
         self.W_U: Float[torch.Tensor, "d_model d_vocab_out"] = nn.Parameter(
             torch.empty(self.cfg.d_model, self.cfg.d_vocab_out)
         )
-        self.b_U: Float[torch.Tensor, "d_vocab_out"] = nn.Parameter(torch.zeros(self.cfg.d_vocab_out))
+        self.b_U: Float[torch.Tensor, "d_vocab_out"] = nn.Parameter(
+            torch.zeros(self.cfg.d_vocab_out)
+        )
 
     def forward(
         self, residual: Float[torch.Tensor, "batch pos d_model"]
@@ -98,6 +100,7 @@ class PosEmbed(nn.Module):
         )  # [batch, pos, d_model]
         return broadcast_pos_embed.clone()
 
+
 class TokenTypeEmbed(nn.Module):
     def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
         super().__init__()
@@ -134,7 +137,9 @@ class BertEmbed(nn.Module):
         position_embeddings_out = self.position_embeddings(index_ids)
         token_type_embeddings_out = self.token_type_embeddings(token_type_ids)
 
-        embeddings_out = word_embeddings_out + position_embeddings_out + token_type_embeddings_out
+        embeddings_out = (
+            word_embeddings_out + position_embeddings_out + token_type_embeddings_out
+        )
         layer_norm_out = self.layer_norm(embeddings_out)
         return layer_norm_out
 
@@ -162,8 +167,15 @@ class LayerNormPre(nn.Module):
         self.hook_normalized = HookPoint()  # [batch, pos, length]
 
     def forward(
-        self, x: Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]]
-    ) -> Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]]:
+        self,
+        x: Union[
+            Float[torch.Tensor, "batch pos d_model"],
+            Float[torch.Tensor, "batch pos head_index d_model"],
+        ],
+    ) -> Union[
+        Float[torch.Tensor, "batch pos d_model"],
+        Float[torch.Tensor, "batch pos head_index d_model"],
+    ]:
         x = x - x.mean(axis=-1, keepdim=True)  # [batch, pos, length]
         scale: Float[torch.Tensor, "batch pos 1"] = self.hook_scale(
             (x.pow(2).mean(-1, keepdim=True) + self.eps).sqrt()
@@ -175,7 +187,6 @@ class LayerNorm(nn.Module):
     def __init__(
         self, cfg: Union[Dict, HookedTransformerConfig], length: Optional[int] = None
     ):
-
         """
         LayerNorm with optional length parameter
 
@@ -200,8 +211,15 @@ class LayerNorm(nn.Module):
         self.hook_normalized = HookPoint()  # [batch, pos, length]
 
     def forward(
-        self, x: Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]]
-    ) -> Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]]:
+        self,
+        x: Union[
+            Float[torch.Tensor, "batch pos d_model"],
+            Float[torch.Tensor, "batch pos head_index d_model"],
+        ],
+    ) -> Union[
+        Float[torch.Tensor, "batch pos d_model"],
+        Float[torch.Tensor, "batch pos head_index d_model"],
+    ]:
         x = x - x.mean(axis=-1, keepdim=True)  # [batch, pos, length]
         scale: Float[torch.Tensor, "batch pos 1"] = self.hook_scale(
             (x.pow(2).mean(-1, keepdim=True) + self.eps).sqrt()
@@ -236,7 +254,6 @@ class RMSNorm(nn.Module):
     def __init__(
         self, cfg: Union[Dict, HookedTransformerConfig], length: Optional[int] = None
     ):
-
         """
         RMSNorm - LayerNorm without the centering and bias (RMS = Root Mean Square)
 
@@ -355,11 +372,11 @@ class Attention(nn.Module):
             )
             self.register_buffer("rotary_sin", sin)
             self.register_buffer("rotary_cos", cos)
-    
+
     @property
     @lru_cache(maxsize=None)
     def OV(self) -> FactoredMatrix:
-        """ 
+        """
         OV-Circuit, as defined in A Mathematical Framework. Because there's no non-linearity between the value vector and the output of the layer, the output is purely determined by the matrix W_OV = W_V @ W_O, and not W_V or W_O individually. (Mathematically, for a single head, output == pattern @ residual @ W_V @ W_O, see the glossary for more)
 
         Done in the order W_V, W_O because the paper uses left-multiplying weight matrices, and TransformerLens uses right-multiplying, sorry!
@@ -369,11 +386,11 @@ class Attention(nn.Module):
         Returns a FactoredMatrix, with left matrix W_V [head_index, d_model, d_head] and right matrix W_O [head_index, d_head, d_model] - this is a low rank factorisation of the underlying [head_index, d_model, d_model]. FactoredMatrix has helper functions to deal with these large matrices efficiently. To get the OV circuit of a head k, attn.OV[k] works.
         """
         return FactoredMatrix(self.W_V, self.W_O)
-    
+
     @property
     @lru_cache(maxsize=None)
     def QK(self) -> FactoredMatrix:
-        """ 
+        """
         QK-Circuit, as defined in A Mathematical Framework. Because there's no non-linearity in the key-query dot product, the output is purely determined by the matrix W_QK = W_Q.T @ W_K, and not W_Q or W_K individually. (Mathematically, for a single head, pattern = destination_residual.T @ W_Q.T @ W_K @ source-residual, see the glossary for more).
 
         Done in the order Q on the left, K on the right, because the pattern has dimensions [destination_pos, source_pos]
@@ -382,15 +399,25 @@ class Attention(nn.Module):
 
         Returns a FactoredMatrix, with left matrix W_Q [head_index, d_model, d_head] and right matrix W_K.T [head_index, d_head, d_model] - this is a low rank factorisation of the underlying [head_index, d_model, d_model] matrix. FactoredMatrix has helper functions to deal with these large matrices efficiently. To get the QK circuit of a head k, attn.QK[k] works.
         """
-        W_K_transpose = einops.rearrange(self.W_K , "head_index d_model d_head -> head_index d_head d_model")
+        W_K_transpose = einops.rearrange(
+            self.W_K, "head_index d_model d_head -> head_index d_head d_model"
+        )
         return FactoredMatrix(self.W_Q, W_K_transpose)
-
 
     def forward(
         self,
-        query_input: Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]],
-        key_input: Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]],
-        value_input: Union[Float[torch.Tensor, "batch pos d_model"], Float[torch.Tensor, "batch pos head_index d_model"]],
+        query_input: Union[
+            Float[torch.Tensor, "batch pos d_model"],
+            Float[torch.Tensor, "batch pos head_index d_model"],
+        ],
+        key_input: Union[
+            Float[torch.Tensor, "batch pos d_model"],
+            Float[torch.Tensor, "batch pos head_index d_model"],
+        ],
+        value_input: Union[
+            Float[torch.Tensor, "batch pos d_model"],
+            Float[torch.Tensor, "batch pos head_index d_model"],
+        ],
         past_kv_cache_entry: Optional[HookedTransformerKeyValueCacheEntry] = None,
     ) -> Float[torch.Tensor, "batch pos d_model"]:
         """
@@ -505,7 +532,9 @@ class Attention(nn.Module):
 
     def apply_causal_mask(
         self,
-        attn_scores: Float[torch.Tensor, "batch head_index pos pos_plus_past_kv_pos_offset"],
+        attn_scores: Float[
+            torch.Tensor, "batch head_index pos pos_plus_past_kv_pos_offset"
+        ],
         past_kv_pos_offset: int = 0,
     ):
         # The query context length is the number of positions we take queries from - if not using a past_kv_cache this is just the context length (for the current prompt), but if we're caching it's just a single token.
@@ -542,7 +571,9 @@ class Attention(nn.Module):
 
     def calculate_sin_cos_rotary(
         self, rotary_dim: int, n_ctx: int, base: int = 10000
-    ) -> Tuple[Float[torch.Tensor, "n_ctx rotary_dim"], Float[torch.Tensor, "n_ctx rotary_dim"]]:
+    ) -> Tuple[
+        Float[torch.Tensor, "n_ctx rotary_dim"], Float[torch.Tensor, "n_ctx rotary_dim"]
+    ]:
         """
         Calculate the sine and cosine waves to use in a rotary embedding. See https://blog.eleuther.ai/rotary-embeddings/ for details
 
@@ -553,7 +584,10 @@ class Attention(nn.Module):
         dim = torch.arange(rotary_dim // 2, dtype=torch.float32)
         # A set of frequencies evenly spaced in log space
         freq = base ** (dim / (rotary_dim / 2))
-        if self.cfg.original_architecture == "GPTNeoXForCausalLM" or self.cfg.original_architecture == "LLaMAForCausalLM":
+        if (
+            self.cfg.original_architecture == "GPTNeoXForCausalLM"
+            or self.cfg.original_architecture == "LLaMAForCausalLM"
+        ):
             freq = einops.repeat(freq, "d -> (2 d)")
         else:
             freq = einops.repeat(freq, "d -> (d 2)")
@@ -561,7 +595,9 @@ class Attention(nn.Module):
         angles = pos[:, None] / freq[None, :]
         return torch.sin(angles), torch.cos(angles)
 
-    def rotate_every_two(self, x: Float[torch.Tensor, "... rotary_dim"]) -> Float[torch.Tensor, "... rotary_dim"]:
+    def rotate_every_two(
+        self, x: Float[torch.Tensor, "... rotary_dim"]
+    ) -> Float[torch.Tensor, "... rotary_dim"]:
         """
         Rotary helper function, splits x into blocks of size 2 along the final axis and maps [x0, x1] to [-x1, x0]
 
@@ -570,7 +606,10 @@ class Attention(nn.Module):
         GPT-NeoX and GPT-J do rotary subtly differently, see calculate_sin_cos_rotary for details.
         """
         rot_x = x.clone()
-        if self.cfg.original_architecture == "GPTNeoXForCausalLM" or self.cfg.original_architecture == "LLaMAForCausalLM":
+        if (
+            self.cfg.original_architecture == "GPTNeoXForCausalLM"
+            or self.cfg.original_architecture == "LLaMAForCausalLM"
+        ):
             n = x.size(-1) // 2
             rot_x[..., :n] = -x[..., n:]
             rot_x[..., n:] = x[..., :n]
@@ -581,7 +620,9 @@ class Attention(nn.Module):
         return rot_x
 
     def apply_rotary(
-        self, x: Float[torch.Tensor, "batch pos head_index d_head"], past_kv_pos_offset=0
+        self,
+        x: Float[torch.Tensor, "batch pos head_index d_head"],
+        past_kv_pos_offset=0,
     ) -> Float[torch.Tensor, "batch pos head_index d_head"]:
         # Only apply rotary to first rotary_dim dimensions (eg, if rotary_dim=64 and d_head=256, only apply to first 1/4 of dimensions)
         x_pos = x.size(1)
@@ -595,6 +636,106 @@ class Attention(nn.Module):
             * self.rotary_sin[past_kv_pos_offset : past_kv_pos_offset + x_pos, None, :]
         )
         return torch.cat([x_rotated, x_pass], dim=-1)
+
+
+class MaskedAttention(nn.Module):
+    def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
+        super().__init__()
+        if isinstance(cfg, dict):
+            cfg = HookedEncoderConfig.from_dict(cfg)
+        self.cfg = cfg
+        self.W_Q = nn.Parameter(
+            torch.empty(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
+        )
+        self.W_K = nn.Parameter(
+            torch.empty(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
+        )
+        self.W_V = nn.Parameter(
+            torch.empty(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
+        )
+        self.W_O = nn.Parameter(
+            torch.empty(self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model)
+        )
+        self.b_Q = nn.Parameter(torch.zeros(self.cfg.n_heads, self.cfg.d_head))
+        self.b_K = nn.Parameter(torch.zeros(self.cfg.n_heads, self.cfg.d_head))
+        self.b_V = nn.Parameter(torch.zeros(self.cfg.n_heads, self.cfg.d_head))
+        self.b_O = nn.Parameter(torch.zeros(self.cfg.d_model))
+
+        # attention
+        self.hook_k = HookPoint()  # [batch, pos, head_index, d_head]
+        self.hook_q = HookPoint()  # [batch, pos, head_index, d_head]
+        self.hook_v = HookPoint()  # [batch, pos, head_index, d_head]
+        self.hook_z = HookPoint()  # [batch, pos, head_index, d_head]
+        self.hook_attn_scores = HookPoint()  # [batch, head_index, query_pos, key_pos]
+        self.hook_pattern = HookPoint()  # [batch, head_index, query_pos, key_pos]
+        self.hook_result = HookPoint()  # [batch, head_index, head_index, d_model]
+
+    def forward(
+        self,
+        resid: Float[torch.Tensor, "batch pos d_model"],
+    ) -> Float[torch.Tensor, "batch pos d_model"]:
+        # TODO: add hoooks
+        q = (
+            einsum(
+                "batch pos d_model, head_index d_model d_head \
+                -> batch pos head_index d_head",
+                resid,
+                self.W_Q,
+            )
+            + self.b_Q
+        )  # [batch, pos, head_index, d_head]
+        k = (
+            einsum(
+                "batch pos d_model, head_index d_model d_head \
+                -> batch pos head_index d_head",
+                resid,
+                self.W_K,
+            )
+            + self.b_K
+        )  # [batch, pos, head_index, d_head]
+        v = (
+            einsum(
+                "batch pos d_model, head_index d_model d_head \
+                -> batch pos head_index d_head",
+                resid,
+                self.W_V,
+            )
+            + self.b_V
+        )  # [batch, pos, head_index, d_head]
+
+        attn_scores = (
+            einsum(
+                "batch query_pos head_index d_head, \
+                batch key_pos head_index d_head \
+                -> batch head_index query_pos key_pos",
+                q,
+                k,
+            )
+            / np.sqrt(self.cfg.d_head)  # attn_scale
+        )  # [batch, head_index, query_pos, key_pos]
+        pattern = F.softmax(attn_scores, dim=-1)
+        z = einsum(
+            "batch key_pos head_index d_head, \
+                batch head_index query_pos key_pos -> \
+                batch query_pos head_index d_head",
+            v,
+            pattern,
+        )  # [batch, pos, head_index, d_head]
+        # TODO: when we add hooks, then add conditional hook here
+        # (if not self.cfg.use_attn_result:)
+        out = (
+            (
+                einsum(
+                    "batch pos head_index d_head, \
+                        head_index d_head d_model -> \
+                        batch pos d_model",
+                    z,
+                    self.W_O,
+                )
+            )
+            + self.b_O
+        )  # [batch, pos, d_model]
+        return out
 
 
 # MLP Layers
@@ -656,6 +797,7 @@ class MLP(nn.Module):
             + self.b_out
         )
 
+
 # TODO
 # not sure whether to fold this into MLP or not
 class GatedMLP(nn.Module):
@@ -670,10 +812,10 @@ class GatedMLP(nn.Module):
         self.W_out = nn.Parameter(torch.empty(self.cfg.d_mlp, self.cfg.d_model))
         self.b_out = nn.Parameter(torch.zeros(self.cfg.d_model))
 
-        # hook on gate output but before act_fn 
-        self.hook_pre = HookPoint() # [batch, pos, d_mlp]
-        # hook on act_fn(gate_output) * W_in(x) + b_in 
-        self.hook_post = HookPoint() # [batch, pos, d_mlp]
+        # hook on gate output but before act_fn
+        self.hook_pre = HookPoint()  # [batch, pos, d_mlp]
+        # hook on act_fn(gate_output) * W_in(x) + b_in
+        self.hook_post = HookPoint()  # [batch, pos, d_mlp]
 
         if self.cfg.act_fn == "relu":
             self.act_fn = F.relu
@@ -701,10 +843,19 @@ class GatedMLP(nn.Module):
         self, x: Float[torch.Tensor, "batch pos d_model"]
     ) -> Float[torch.Tensor, "batch pos d_model"]:
         # Technically, all these einsums could be done with a single matmul, but this is more readable.
-        pre_act = self.hook_pre(einsum("batch pos d_model, d_model d_mlp -> batch pos d_mlp", x, self.W_gate))  # [batch, pos, d_mlp]
+        pre_act = self.hook_pre(
+            einsum(
+                "batch pos d_model, d_model d_mlp -> batch pos d_mlp", x, self.W_gate
+            )
+        )  # [batch, pos, d_mlp]
         if not self.cfg.act_fn.endswith("_ln"):
-            post_act = self.hook_post(self.act_fn(pre_act) * einsum("batch pos d_model, d_model d_mlp -> batch pos d_mlp", x, self.W_in)
-            + self.b_in)  # [batch, pos, d_mlp]
+            post_act = self.hook_post(
+                self.act_fn(pre_act)
+                * einsum(
+                    "batch pos d_model, d_model d_mlp -> batch pos d_mlp", x, self.W_in
+                )
+                + self.b_in
+            )  # [batch, pos, d_mlp]
         else:
             mid_act = self.hook_mid(self.act_fn(pre_act))  # [batch, pos, d_mlp]
             post_act = self.hook_post(self.ln(mid_act))
@@ -734,7 +885,7 @@ class TransformerBlock(nn.Module):
             self.ln1 = LayerNormPre(cfg)
             if not self.cfg.attn_only:
                 self.ln2 = LayerNormPre(cfg)
-        elif self.cfg.normalization_type == "RMS": 
+        elif self.cfg.normalization_type == "RMS":
             self.ln1 = RMSNorm(cfg)
             if not self.cfg.attn_only:
                 self.ln2 = RMSNorm(cfg)
@@ -760,7 +911,7 @@ class TransformerBlock(nn.Module):
         if not self.cfg.attn_only:
             if self.cfg.gated_mlp:
                 self.mlp = GatedMLP(cfg)
-            else: 
+            else:
                 self.mlp = MLP(cfg)
 
         self.hook_q_input = HookPoint()  # [batch, pos, d_model]
@@ -777,7 +928,9 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         resid_pre: Float[torch.Tensor, "batch pos d_model"],
-        shortformer_pos_embed: Optional[Float[torch.Tensor, "batch pos d_model"]] = None,
+        shortformer_pos_embed: Optional[
+            Float[torch.Tensor, "batch pos d_model"]
+        ] = None,
         past_kv_cache_entry: Optional[HookedTransformerKeyValueCacheEntry] = None,
     ) -> Float[torch.Tensor, "batch pos d_model"]:
         """A single Transformer block.
@@ -795,10 +948,15 @@ class TransformerBlock(nn.Module):
         query_input = resid_pre
         key_input = resid_pre
         value_input = resid_pre
-        
+
         if self.cfg.use_split_qkv_input:
+
             def add_head_dimension(tensor):
-                return einops.repeat(tensor, "batch pos d_model -> batch pos n_heads d_model", n_heads=self.cfg.n_heads).clone()
+                return einops.repeat(
+                    tensor,
+                    "batch pos d_model -> batch pos n_heads d_model",
+                    n_heads=self.cfg.n_heads,
+                ).clone()
 
             query_input = self.hook_q_input(add_head_dimension(query_input))
             key_input = self.hook_k_input(add_head_dimension(key_input))
@@ -808,13 +966,15 @@ class TransformerBlock(nn.Module):
                 shortformer_pos_embed = add_head_dimension(shortformer_pos_embed)
 
         attn_out = self.hook_attn_out(
-            # hook the residual stream states that are used to calculate the 
-            # queries, keys and values, independently. 
+            # hook the residual stream states that are used to calculate the
+            # queries, keys and values, independently.
             # Then take the layer norm of these inputs, and pass these to the attention module.
             self.attn(
-                query_input = self.ln1(query_input) + (0.0 if shortformer_pos_embed is None else shortformer_pos_embed),
-                key_input = self.ln1(key_input) + (0.0 if shortformer_pos_embed is None else shortformer_pos_embed),
-                value_input = self.ln1(value_input),
+                query_input=self.ln1(query_input)
+                + (0.0 if shortformer_pos_embed is None else shortformer_pos_embed),
+                key_input=self.ln1(key_input)
+                + (0.0 if shortformer_pos_embed is None else shortformer_pos_embed),
+                value_input=self.ln1(value_input),
                 past_kv_cache_entry=past_kv_cache_entry,
             )
         )  # [batch, pos, d_model]
