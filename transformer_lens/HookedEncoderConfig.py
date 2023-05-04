@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -15,13 +17,14 @@ class HookedEncoderConfig(TransformerLensConfig):
     d_vocab: int
     n_heads: int
     d_head: int
+    n_layers: int
     use_attn_result: bool = True
     eps: float = 1e-12
 
     model_type: str = "hooked_encoder"
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]):
+    def from_dict(cls, config_dict: Dict[str, Any]) -> HookedEncoderConfig:
         """
         Instantiates a `HookedEncoderConfig` from a Python dictionary of parameters.
         """

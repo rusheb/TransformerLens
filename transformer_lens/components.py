@@ -120,10 +120,10 @@ class BertEmbed(nn.Module):
         if isinstance(cfg, Dict):
             cfg = HookedEncoderConfig.from_dict(cfg)
         self.cfg = cfg
-        self.word_embeddings = Embed(cfg)
-        self.position_embeddings = PosEmbed(cfg)
-        self.token_type_embeddings = TokenTypeEmbed(cfg)
-        self.layer_norm = LayerNorm(cfg)
+        self.word_embed = Embed(cfg)
+        self.pos_embed = PosEmbed(cfg)
+        self.token_type_embed = TokenTypeEmbed(cfg)
+        self.ln = LayerNorm(cfg)
 
     def forward(self, input_ids, token_type_ids=None):
         base_index_id = torch.arange(input_ids.shape[1], device=input_ids.device)
@@ -133,14 +133,14 @@ class BertEmbed(nn.Module):
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
-        word_embeddings_out = self.word_embeddings(input_ids)
-        position_embeddings_out = self.position_embeddings(index_ids)
-        token_type_embeddings_out = self.token_type_embeddings(token_type_ids)
+        word_embeddings_out = self.word_embed(input_ids)
+        position_embeddings_out = self.pos_embed(index_ids)
+        token_type_embeddings_out = self.token_type_embed(token_type_ids)
 
         embeddings_out = (
             word_embeddings_out + position_embeddings_out + token_type_embeddings_out
         )
-        layer_norm_out = self.layer_norm(embeddings_out)
+        layer_norm_out = self.ln(embeddings_out)
         return layer_norm_out
 
 
@@ -185,7 +185,7 @@ class LayerNormPre(nn.Module):
 
 class LayerNorm(nn.Module):
     def __init__(
-        self, cfg: Union[Dict, HookedTransformerConfig], length: Optional[int] = None
+        self, cfg: Union[Dict, TransformerLensConfig], length: Optional[int] = None
     ):
         """
         LayerNorm with optional length parameter
