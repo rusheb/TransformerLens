@@ -11,8 +11,8 @@ class HookedEncoderConfig(TransformerLensConfig):
     """
     d_model: int
     n_ctx: int
-    eps: int
     d_vocab: int
+    eps: float = 1e-12
 
     model_type: str = "hooked_encoder"
 
