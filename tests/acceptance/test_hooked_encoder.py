@@ -1,8 +1,10 @@
+from einops import einops
 from torch.testing import assert_close
 from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
 
 from transformer_lens.components import BertEmbed, MaskedAttention
 from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
+from transformer_lens.utils import get_corner
 
 
 def test_bert_embed_one_sentence():
@@ -48,7 +50,7 @@ def convert_hf_model_cfg() -> HookedEncoderConfig:
         "d_model": hf_config.hidden_size,
         "n_ctx": hf_config.max_position_embeddings,
         "n_heads": hf_config.num_attention_heads,
-        "d_head": hf_config.hidden_size,
+        "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
         "n_layers": hf_config.num_hidden_layers,
         "eps": hf_config.layer_norm_eps,
     }
@@ -66,65 +68,85 @@ def convert_bert_embedding_weights(bert, cfg: HookedEncoderConfig):
 
     return state_dict
 
-# def test_bert_attention():
-#     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-#     sequence = "one token two tokens [MASK]"
-#     encoding = tokenizer(sequence, return_tensors="pt")
-#     input_ids = encoding["input_ids"]
-#     cfg = HookedEncoderConfig(
-#         d_vocab=28996,
-#         d_model=768,
-#         n_ctx=512,
-#         n_heads=12,
-#         d_head=768,
-#         eps=1e-12,
-#     )
-#
-#     hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
-#     hf_embed = hf_bert.bert.embeddings
-#     embed_out = hf_embed(input_ids)
-#     our_attention = MaskedAttention(cfg)
-#
-#     state_dict = convert_bert_attention_weights(hf_bert, cfg)
-#
-#     our_attention.load_state_dict(state_dict)
-#
-#     hf_attention_self = hf_bert.bert.encoder.layer[0].attention.self
-#     hf_attention_out = hf_bert.bert.encoder.layer[0].attention.output.dense
-#     hf_attention_self_output = hf_attention_self(embed_out)[0]
-#     their_attention_output = hf_attention_out(hf_attention_self_output)
-#
-#     # state_dict = convert_bert_attention_weights(
-#     #     hf_attention_self, hf_attention_out
-#     # )
-#     # our_attention.load_state_dict(state_dict)
-#     # breakpoint()
+
+# TODO no worky worky
+def test_bert_attention_load():
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+    # TODO: change this
+    sequence = "one token two tokens [MASK]"
+    input_ids = tokenizer(sequence, return_tensors="pt")["input_ids"]
+
+    cfg = convert_hf_model_cfg()
+
+    hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
+    hf_embed = hf_bert.bert.embeddings
+    embed_out = hf_embed(input_ids)
+
+    state_dict = convert_bert_attention_weights(hf_bert, cfg)
+
+    our_attention = MaskedAttention(cfg)
+    hf_attention = hf_bert.bert.encoder.layer[0].attention
+    our_attention.load_state_dict(state_dict)
+
+    our_attention_out = our_attention(embed_out)
+    hf_attention_out = hf_bert.bert.encoder.layer[0].attention(embed_out)[0]
+    pass
+
+
+def convert_bert_attention_weights(
+        bert, cfg: HookedEncoderConfig
+):
+    state_dict = {}
+
+    attention = bert.bert.encoder.layer[0].attention
+
+    W_Q = einops.rearrange(attention.self.query.weight, "m (i h) -> i m h", i=cfg.n_heads)
+    b_Q = einops.rearrange(attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads)
+
+    W_K = einops.rearrange(attention.self.key.weight, "m (i h) -> i m h", i=cfg.n_heads)
+    b_K = einops.rearrange(attention.self.key.bias, "(i h) -> i h", i=cfg.n_heads)
+
+    W_V = einops.rearrange(attention.self.value.weight, "m (i h) -> i m h", i=cfg.n_heads)
+    b_V = einops.rearrange(attention.self.value.bias, "(i h) -> i h", i=cfg.n_heads)
+
+    W_O = einops.rearrange(attention.output.dense.weight, "(i h) m->i h m", i=cfg.n_heads)
+
+    state_dict["W_Q"] = W_Q
+    state_dict["b_Q"] = b_Q
+
+    state_dict["W_K"] = W_K
+    state_dict["b_K"] = b_K
+
+    state_dict["W_V"] = W_V
+    state_dict["b_V"] = b_V
+
+    # TODO is output correct?
+
+    state_dict["W_O"] = W_O
+    state_dict["b_O"] = attention.output.dense.bias
+
+    return state_dict
+
+
+    # our_attention = MaskedAttention(cfg)
+    #
+    # state_dict = convert_bert_attention_weights(hf_bert, cfg)
+    #
+    # our_attention.load_state_dict(state_dict)
+    #
+    # hf_attention_self = hf_bert.bert.encoder.layer[0].attention.self
+    # hf_attention_out = hf_bert.bert.encoder.layer[0].attention.output.dense
+    # hf_attention_self_output = hf_attention_self(embed_out)[0]
+    their_attention_output = hf_attention_out(hf_attention_self_output)
+
+    # state_dict = convert_bert_attention_weights(
+    #     hf_attention_self, hf_attention_out
+    # )
+    # our_attention.load_state_dict(state_dict)
+    # breakpoint()
 #
 #     our_attention_output = our_attention(embed_out)
 #
 #     assert our_attention_output.shape == their_attention_output.shape
 #
 #
-# def convert_bert_attention_weights(
-#         bert, cfg: HookedEncoderConfig
-# ):
-#     state_dict = {}
-#
-#     for l in range(cfg.n_layers):
-#         attention = bert.encoder.layer[l].attention
-#         TODO this won't work because we are overwriting thee values every time into the statedict
-#           and also we are not doing multi-headed attention
-
-#         state_dict["W_Q"] = attention.self.query.weight
-#         state_dict["b_Q"] = attention.self.query.bias
-#
-#         state_dict["W_K"] = attention.self.key.weight
-#         state_dict["b_K"] = attention.self.key.bias
-#
-#         state_dict["W_V"] = attention.self.value.weight
-#         state_dict["b_V"] = attention.self.value.bias
-#
-#         state_dict["W_O"] = attention.output.dense.weight
-#         state_dict["b_O"] = attention.output.dense.bias
-#
-#     return state_dict
