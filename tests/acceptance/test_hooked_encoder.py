@@ -5,7 +5,7 @@ from torch.testing import assert_close
 from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
 
 from transformer_lens import HookedTransformerConfig
-from transformer_lens.components import BertEmbed, MaskedAttention, Attention
+from transformer_lens.components import BertEmbed, MaskedAttention, Attention, BertBlock
 from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
 from transformer_lens.utils import get_corner
 
@@ -74,9 +74,7 @@ def convert_bert_embedding_weights(bert, cfg: HookedEncoderConfig):
 
 def test_bert_attention():
     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-    # TODO: change this
-    sequence = "one token two tokens [MASK]"
-    input_ids = tokenizer(sequence, return_tensors="pt")["input_ids"]
+    input_ids = tokenizer("Hello, world!", return_tensors="pt")["input_ids"]
 
     cfg = convert_hf_model_cfg()
 
@@ -111,3 +109,41 @@ def convert_bert_attention_weights(
         "W_O": einops.rearrange(attention.output.dense.weight, "m (i h) -> i h m", i=cfg.n_heads),
         "b_O": attention.output.dense.bias
     }
+
+
+def test_bert_block():
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+    input_ids = tokenizer("Hello, world!", return_tensors="pt")["input_ids"]
+
+    cfg = convert_hf_model_cfg()
+
+    hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
+    hf_embed = hf_bert.bert.embeddings
+    embed_out = hf_embed(input_ids)
+
+    our_block = BertBlock(cfg)
+    hf_block = hf_bert.bert.encoder.layer[0]
+
+    state_dict = {
+        "attn.W_Q": einops.rearrange(hf_block.attention.self.query.weight, "(i h) m -> i m h", i=cfg.n_heads),
+        "attn.b_Q": einops.rearrange(hf_block.attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads),
+        "attn.W_K": einops.rearrange(hf_block.attention.self.key.weight, "(i h) m -> i m h", i=cfg.n_heads),
+        "attn.b_K": einops.rearrange(hf_block.attention.self.key.bias, "(i h) -> i h", i=cfg.n_heads),
+        "attn.W_V": einops.rearrange(hf_block.attention.self.value.weight, "(i h) m -> i m h", i=cfg.n_heads),
+        "attn.b_V": einops.rearrange(hf_block.attention.self.value.bias, "(i h) -> i h", i=cfg.n_heads),
+        "attn.W_O": einops.rearrange(hf_block.attention.output.dense.weight, "m (i h) -> i h m", i=cfg.n_heads),
+        "attn.b_O": hf_block.attention.output.dense.bias,
+        "ln1.w": hf_block.attention.output.LayerNorm.weight,
+        "ln1.b": hf_block.attention.output.LayerNorm.bias,
+        "mlp.W_in": einops.rearrange(hf_block.intermediate.dense.weight, "mlp model -> model mlp"),
+        "mlp.b_in": hf_block.intermediate.dense.bias,
+        "mlp.W_out": einops.rearrange(hf_block.output.dense.weight, "model mlp -> mlp model"),
+        "mlp.b_out": hf_block.output.dense.bias,
+        "ln2.w": hf_block.output.LayerNorm.weight,
+        "ln2.b": hf_block.output.LayerNorm.bias
+    }
+    our_block.load_state_dict(state_dict, strict=False)
+
+    our_block_out = our_block(embed_out)
+    hf_block_out = hf_block(embed_out)
+    assert_close(our_block_out, hf_block_out[0])

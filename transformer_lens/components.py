@@ -952,3 +952,19 @@ class TransformerBlock(nn.Module):
                 resid_pre + attn_out
             )  # [batch, pos, d_model]
         return resid_post
+
+
+class BertBlock(nn.Module):
+    def __init__(self, cfg: HookedTransformerConfig):
+        super().__init__()
+        self.attn = Attention(cfg)
+        self.ln1 = LayerNorm(cfg)
+        self.mlp = MLP(cfg)
+        self.ln2 = LayerNorm(cfg)
+
+    def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]):
+        resid = resid + self.attn(resid, resid, resid)
+        resid = self.ln1(resid)
+        resid = resid + self.mlp(resid)
+        resid = self.ln2(resid)
+        return resid
