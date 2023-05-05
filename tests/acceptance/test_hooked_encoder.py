@@ -72,7 +72,6 @@ def convert_bert_embedding_weights(bert, cfg: HookedEncoderConfig):
     return state_dict
 
 
-# # TODO no worky worky
 def test_bert_attention_load():
     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
     # TODO: change this
@@ -102,12 +101,8 @@ def test_bert_attention_load():
 
     our_attention.load_state_dict(state_dict)
 
-    print("BEFORE OUR ATTENTION")
-    our_attention_out = our_attention(embed_out)[0]
-    print("AFTER OUR ATTENTION")
-    print("BEFORE THEIR ATTENTION")
+    our_attention_out = our_attention(embed_out)
     hf_attention_out = hf_bert.bert.encoder.layer[0].attention.self(embed_out)[0]
-    print("AFTER THEIR ATTENTION")
     assert_close(our_attention_out, hf_attention_out)
 
 
