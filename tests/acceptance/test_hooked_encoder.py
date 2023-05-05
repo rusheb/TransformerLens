@@ -1,13 +1,10 @@
-import torch
 from einops import einops
-from torch import nn
 from torch.testing import assert_close
 from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
 
 from transformer_lens import HookedTransformerConfig
-from transformer_lens.components import BertEmbed, MaskedAttention, Attention, BertBlock
+from transformer_lens.components import BertEmbed, Attention, BertBlock
 from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
-from transformer_lens.utils import get_corner
 
 
 def test_bert_embed_one_sentence():
@@ -85,21 +82,8 @@ def test_bert_attention():
     our_attention = Attention(cfg)
     hf_attention = hf_bert.bert.encoder.layer[0].attention
 
-    state_dict = convert_bert_attention_weights(hf_bert, cfg)
-    our_attention.load_state_dict(state_dict, strict=False)
-
-    our_attention_out = our_attention(embed_out, embed_out, embed_out)
-    hf_self_attention_out = hf_attention.self(embed_out)[0]
-    hf_attention_out = hf_attention.output.dense(hf_self_attention_out)
-    assert_close(our_attention_out, hf_attention_out)
-
-
-def convert_bert_attention_weights(
-        bert, cfg: HookedEncoderConfig
-):
-    attention = bert.bert.encoder.layer[0].attention
-
-    return {
+    attention = hf_bert.bert.encoder.layer[0].attention
+    state_dict = {
         "W_Q": einops.rearrange(attention.self.query.weight, "(i h) m -> i m h", i=cfg.n_heads),
         "b_Q": einops.rearrange(attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads),
         "W_K": einops.rearrange(attention.self.key.weight, "(i h) m -> i m h", i=cfg.n_heads),
@@ -109,6 +93,12 @@ def convert_bert_attention_weights(
         "W_O": einops.rearrange(attention.output.dense.weight, "m (i h) -> i h m", i=cfg.n_heads),
         "b_O": attention.output.dense.bias
     }
+    our_attention.load_state_dict(state_dict, strict=False)
+
+    our_attention_out = our_attention(embed_out, embed_out, embed_out)
+    hf_self_attention_out = hf_attention.self(embed_out)[0]
+    hf_attention_out = hf_attention.output.dense(hf_self_attention_out)
+    assert_close(our_attention_out, hf_attention_out)
 
 
 def test_bert_block():
