@@ -1,10 +1,9 @@
 from einops import einops
 from torch.testing import assert_close
-from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
+from transformers import AutoTokenizer, AutoConfig, BertModel
 
 from transformer_lens import HookedTransformerConfig
 from transformer_lens.components import BertEmbed, Attention, BertBlock
-from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
 
 
 def test_bert_embed_one_sentence():
@@ -34,8 +33,8 @@ def load_embed():
     cfg = convert_hf_model_cfg()
     embed = BertEmbed(cfg)
 
-    huggingface_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
-    huggingface_embed = huggingface_bert.bert.embeddings
+    huggingface_bert = BertModel.from_pretrained("bert-base-cased")
+    huggingface_embed = huggingface_bert.embeddings
 
     state_dict = convert_bert_embedding_weights(huggingface_bert, cfg)
     embed.load_state_dict(state_dict)
@@ -59,13 +58,13 @@ def convert_hf_model_cfg() -> HookedTransformerConfig:
     return HookedTransformerConfig.from_dict(cfg_dict)
 
 
-def convert_bert_embedding_weights(bert, cfg: HookedEncoderConfig):
+def convert_bert_embedding_weights(bert, cfg: HookedTransformerConfig):
     return {
-        "word_embed.W_E": bert.bert.embeddings.word_embeddings.weight,
-        "pos_embed.W_pos": bert.bert.embeddings.position_embeddings.weight,
-        "token_type_embed.W_token_type": bert.bert.embeddings.token_type_embeddings.weight,
-        "ln.w": bert.bert.embeddings.LayerNorm.weight,
-        "ln.b": bert.bert.embeddings.LayerNorm.bias,
+        "word_embed.W_E": bert.embeddings.word_embeddings.weight,
+        "pos_embed.W_pos": bert.embeddings.position_embeddings.weight,
+        "token_type_embed.W_token_type": bert.embeddings.token_type_embeddings.weight,
+        "ln.w": bert.embeddings.LayerNorm.weight,
+        "ln.b": bert.embeddings.LayerNorm.bias,
     }
 
 
@@ -75,14 +74,14 @@ def test_bert_attention():
 
     cfg = convert_hf_model_cfg()
 
-    hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
-    hf_embed = hf_bert.bert.embeddings
+    hf_bert = BertModel.from_pretrained("bert-base-cased")
+    hf_embed = hf_bert.embeddings
     embed_out = hf_embed(input_ids)
 
     our_attention = Attention(cfg)
-    hf_attention = hf_bert.bert.encoder.layer[0].attention
+    hf_attention = hf_bert.encoder.layer[0].attention
 
-    attention = hf_bert.bert.encoder.layer[0].attention
+    attention = hf_bert.encoder.layer[0].attention
     state_dict = {
         "W_Q": einops.rearrange(attention.self.query.weight, "(i h) m -> i m h", i=cfg.n_heads),
         "b_Q": einops.rearrange(attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads),
@@ -107,12 +106,12 @@ def test_bert_block():
 
     cfg = convert_hf_model_cfg()
 
-    hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
-    hf_embed = hf_bert.bert.embeddings
+    hf_bert = BertModel.from_pretrained("bert-base-cased")
+    hf_embed = hf_bert.embeddings
     embed_out = hf_embed(input_ids)
 
     our_block = BertBlock(cfg)
-    hf_block = hf_bert.bert.encoder.layer[0]
+    hf_block = hf_bert.encoder.layer[0]
 
     state_dict = {
         "attn.W_Q": einops.rearrange(hf_block.attention.self.query.weight, "(i h) m -> i m h", i=cfg.n_heads),
