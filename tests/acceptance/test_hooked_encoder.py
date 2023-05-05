@@ -1,8 +1,11 @@
+import torch
 from einops import einops
+from torch import nn
 from torch.testing import assert_close
 from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
 
-from transformer_lens.components import BertEmbed, MaskedAttention
+from transformer_lens import HookedTransformerConfig
+from transformer_lens.components import BertEmbed, MaskedAttention, Attention
 from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
 from transformer_lens.utils import get_corner
 
@@ -12,7 +15,7 @@ def test_bert_embed_one_sentence():
     encoding = tokenizer("Hello, world!", return_tensors="pt")
     input_ids = encoding["input_ids"]
 
-    embed, huggingface_embed = load_weights_from_huggingface()
+    embed, huggingface_embed = load_embed()
 
     assert_close(embed(input_ids), huggingface_embed(input_ids))
 
@@ -22,7 +25,7 @@ def test_bert_embed_two_sentences():
     encoding = tokenizer("First sentence.", "Second sentence.", return_tensors="pt")
     input_ids = encoding["input_ids"]
     token_type_ids = encoding["token_type_ids"]
-    embed, huggingface_embed = load_weights_from_huggingface()
+    embed, huggingface_embed = load_embed()
 
     assert_close(
         embed(input_ids, token_type_ids=token_type_ids),
@@ -30,7 +33,7 @@ def test_bert_embed_two_sentences():
     )
 
 
-def load_weights_from_huggingface():
+def load_embed():
     cfg = convert_hf_model_cfg()
     embed = BertEmbed(cfg)
 
@@ -51,22 +54,22 @@ def convert_hf_model_cfg() -> HookedEncoderConfig:
         "n_ctx": hf_config.max_position_embeddings,
         "n_heads": hf_config.num_attention_heads,
         "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
+        "act_fn": "gelu",
         "n_layers": hf_config.num_hidden_layers,
         "eps": hf_config.layer_norm_eps,
+        "attention_dir": "bidirectional",
     }
-    return HookedEncoderConfig.from_dict(cfg_dict)
+    return HookedTransformerConfig.from_dict(cfg_dict)
 
 
 def convert_bert_embedding_weights(bert, cfg: HookedEncoderConfig):
-    state_dict = {
+    return {
         "word_embed.W_E": bert.bert.embeddings.word_embeddings.weight,
         "pos_embed.W_pos": bert.bert.embeddings.position_embeddings.weight,
         "token_type_embed.W_token_type": bert.bert.embeddings.token_type_embeddings.weight,
         "ln.w": bert.bert.embeddings.LayerNorm.weight,
         "ln.b": bert.bert.embeddings.LayerNorm.bias,
     }
-
-    return state_dict
 
 
 def test_bert_attention():
@@ -81,25 +84,13 @@ def test_bert_attention():
     hf_embed = hf_bert.bert.embeddings
     embed_out = hf_embed(input_ids)
 
-    # state_dict = convert_bert_attention_weights(hf_bert, cfg)
-    our_attention = MaskedAttention(cfg)
-
+    our_attention = Attention(cfg)
     hf_attention = hf_bert.bert.encoder.layer[0].attention
 
-    state_dict = {
-        "W_Q": einops.rearrange(hf_attention.self.query.weight, "(head_index d_head) d_model -> head_index d_model d_head", head_index=cfg.n_heads),
-        "b_Q": einops.rearrange(hf_attention.self.query.bias, "(head_index d_head) -> head_index d_head", head_index=cfg.n_heads),
-        "key.weight": hf_attention.self.key.weight,
-        "key.bias": hf_attention.self.key.bias,
-        "value.weight": hf_attention.self.value.weight,
-        "value.bias": hf_attention.self.value.bias,
-        "W_O": einops.rearrange(hf_attention.output.dense.weight, "d_model (head_index d_head) -> head_index d_head d_model", head_index=cfg.n_heads),
-        "b_O": hf_attention.output.dense.bias
-    }
+    state_dict = convert_bert_attention_weights(hf_bert, cfg)
+    our_attention.load_state_dict(state_dict, strict=False)
 
-    our_attention.load_state_dict(state_dict)
-
-    our_attention_out = our_attention(embed_out)
+    our_attention_out = our_attention(embed_out, embed_out, embed_out)
     hf_self_attention_out = hf_attention.self(embed_out)[0]
     hf_attention_out = hf_attention.output.dense(hf_self_attention_out)
     assert_close(our_attention_out, hf_attention_out)
@@ -108,4 +99,15 @@ def test_bert_attention():
 def convert_bert_attention_weights(
         bert, cfg: HookedEncoderConfig
 ):
-    pass
+    attention = bert.bert.encoder.layer[0].attention
+
+    return {
+        "W_Q": einops.rearrange(attention.self.query.weight, "(i h) m -> i m h", i=cfg.n_heads),
+        "b_Q": einops.rearrange(attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads),
+        "W_K": einops.rearrange(attention.self.key.weight, "(i h) m -> i m h", i=cfg.n_heads),
+        "b_K": einops.rearrange(attention.self.key.bias, "(i h) -> i h", i=cfg.n_heads),
+        "W_V": einops.rearrange(attention.self.value.weight, "(i h) m -> i m h", i=cfg.n_heads),
+        "b_V": einops.rearrange(attention.self.value.bias, "(i h) -> i h", i=cfg.n_heads),
+        "W_O": einops.rearrange(attention.output.dense.weight, "m (i h) -> i h m", i=cfg.n_heads),
+        "b_O": attention.output.dense.bias
+    }
