@@ -46,7 +46,7 @@ def load_embed():
     return embed, huggingface_embed
 
 
-def convert_hf_model_cfg() -> HookedEncoderConfig:
+def convert_hf_model_cfg() -> HookedTransformerConfig:
     hf_config = AutoConfig.from_pretrained("bert-base-cased")
     cfg_dict = {
         "d_vocab": hf_config.vocab_size,

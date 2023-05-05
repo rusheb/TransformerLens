@@ -25,34 +25,3 @@ def test_hooked_transformer_config_dict():
         "attn_only": True,
     }
     Embed(hooked_transformer_config_dict)
-
-
-def test_hooked_encoder_config_object():
-    hooked_transformer_config = HookedEncoderConfig(d_model=6, d_vocab=100, n_ctx=5, n_heads=2, d_head=3, n_layers=4)
-    Embed(hooked_transformer_config)
-
-
-def test_hooked_encoder_config_dict():
-    hooked_encoder_config_dict = {
-        "d_model": 6,
-        "d_vocab": 100,
-        "n_ctx": 5,
-        "n_heads": 2,
-        "d_head": 3,
-        "n_layers": 4,
-        "model_type": "hooked_encoder",
-    }
-    Embed(hooked_encoder_config_dict)
-
-
-def test_hooked_encoder_config_dict_requires_model_type():
-    # fails because model_type defaults to "hooked_transformer", which has more required arguments
-    with pytest.raises(TypeError) as e:
-        Embed({"d_model": 6, "d_vocab": 100})
-
-    # Depending how the test is run, a different error witll be raised
-    # See https://github.com/neelnanda-io/TransformerLens/issues/190
-    dataclass_pattern = r"HookedTransformerConfig.__init__\(\) missing \d+ required positional arguments"
-    typeguard_pattern = r"missing a required argument: .*"
-
-    assert e.match(f"{dataclass_pattern}|{typeguard_pattern}")

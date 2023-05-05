@@ -12,29 +12,17 @@ from jaxtyping import Float, Int
 
 from transformer_lens.FactoredMatrix import FactoredMatrix
 from transformer_lens.hook_points import HookPoint
-from transformer_lens.HookedEncoderConfig import HookedEncoderConfig
 from transformer_lens.HookedTransformerConfig import HookedTransformerConfig
 from transformer_lens.past_key_value_caching import HookedTransformerKeyValueCacheEntry
-from transformer_lens.TransformerLensConfig import TransformerLensConfig
 from transformer_lens.utils import gelu_fast, gelu_new, solu
-
-
-def config_from_dict(cfg: Dict) -> TransformerLensConfig:
-    model_type = cfg.get("model_type", "hooked_transformer")
-    if model_type == "hooked_transformer":
-        return HookedTransformerConfig.from_dict(cfg)
-    elif model_type == "hooked_encoder":
-        return HookedEncoderConfig.from_dict(cfg)
-    else:
-        raise ValueError(f"Unknown model_type: {model_type}")
 
 
 # Embed & Unembed
 class Embed(nn.Module):
-    def __init__(self, cfg: Union[Dict, TransformerLensConfig]):
+    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
         super().__init__()
         if isinstance(cfg, Dict):
-            cfg = config_from_dict(cfg)
+            cfg = HookedTransformerConfig.from_dict(cfg)
         self.cfg = cfg
         self.W_E: Float[torch.Tensor, "d_vocab d_model"] = nn.Parameter(
             torch.empty(self.cfg.d_vocab, self.cfg.d_model)
@@ -77,10 +65,10 @@ class Unembed(nn.Module):
 
 # Positional Embeddings
 class PosEmbed(nn.Module):
-    def __init__(self, cfg: Union[Dict, TransformerLensConfig]):
+    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
         super().__init__()
         if isinstance(cfg, Dict):
-            cfg = TransformerLensConfig.from_dict(cfg)
+            cfg = HookedTransformerConfig.from_dict(cfg)
         self.cfg = cfg
         self.W_pos = nn.Parameter(torch.empty(self.cfg.n_ctx, self.cfg.d_model))
 
@@ -102,10 +90,10 @@ class PosEmbed(nn.Module):
 
 
 class TokenTypeEmbed(nn.Module):
-    def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
+    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
         super().__init__()
         if isinstance(cfg, Dict):
-            cfg = HookedEncoderConfig.from_dict(cfg)
+            cfg = HookedTransformerConfig.from_dict(cfg)
         self.cfg = cfg
         self.W_token_type = nn.Parameter(torch.empty(2, self.cfg.d_model))
 
@@ -115,10 +103,10 @@ class TokenTypeEmbed(nn.Module):
 
 
 class BertEmbed(nn.Module):
-    def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
+    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
         super().__init__()
         if isinstance(cfg, Dict):
-            cfg = HookedEncoderConfig.from_dict(cfg)
+            cfg = HookedTransformerConfig.from_dict(cfg)
         self.cfg = cfg
         self.word_embed = Embed(cfg)
         self.pos_embed = PosEmbed(cfg)
@@ -185,7 +173,7 @@ class LayerNormPre(nn.Module):
 
 class LayerNorm(nn.Module):
     def __init__(
-        self, cfg: Union[Dict, TransformerLensConfig], length: Optional[int] = None
+        self, cfg: Union[Dict, HookedTransformerConfig], length: Optional[int] = None
     ):
         """
         LayerNorm with optional length parameter
@@ -640,10 +628,10 @@ class Attention(nn.Module):
 
 
 class MaskedAttention(nn.Module):
-    def __init__(self, cfg: Union[Dict, HookedEncoderConfig]):
+    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
         super().__init__()
         if isinstance(cfg, dict):
-            cfg = HookedEncoderConfig.from_dict(cfg)
+            cfg = HookedTransformerConfig.from_dict(cfg)
         self.cfg = cfg
         self.key = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
         self.value = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
