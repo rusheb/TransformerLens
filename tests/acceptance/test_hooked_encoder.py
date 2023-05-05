@@ -1,7 +1,4 @@
 from einops import einops
-import torch
-from fancy_einsum import einsum
-from torch import nn
 from torch.testing import assert_close
 from transformers import AutoTokenizer, BertForMaskedLM, AutoConfig
 
@@ -87,131 +84,28 @@ def test_bert_attention():
     # state_dict = convert_bert_attention_weights(hf_bert, cfg)
     our_attention = MaskedAttention(cfg)
 
-
     hf_attention = hf_bert.bert.encoder.layer[0].attention
 
     state_dict = {
-        "query.weight": hf_attention.self.query.weight,
-        "query.bias": hf_attention.self.query.bias,
+        "W_Q": einops.rearrange(hf_attention.self.query.weight, "(head_index d_head) d_model -> head_index d_model d_head", head_index=cfg.n_heads),
+        "b_Q": einops.rearrange(hf_attention.self.query.bias, "(head_index d_head) -> head_index d_head", head_index=cfg.n_heads),
         "key.weight": hf_attention.self.key.weight,
         "key.bias": hf_attention.self.key.bias,
         "value.weight": hf_attention.self.value.weight,
         "value.bias": hf_attention.self.value.bias,
+        "W_O": einops.rearrange(hf_attention.output.dense.weight, "d_model (head_index d_head) -> head_index d_head d_model", head_index=cfg.n_heads),
+        "b_O": hf_attention.output.dense.bias
     }
 
     our_attention.load_state_dict(state_dict)
 
     our_attention_out = our_attention(embed_out)
-    hf_attention_out = hf_bert.bert.encoder.layer[0].attention.self(embed_out)[0]
+    hf_self_attention_out = hf_attention.self(embed_out)[0]
+    hf_attention_out = hf_attention.output.dense(hf_self_attention_out)
     assert_close(our_attention_out, hf_attention_out)
-
 
 
 def convert_bert_attention_weights(
         bert, cfg: HookedEncoderConfig
 ):
-    state_dict = {}
-
-    attention = bert.bert.encoder.layer[0].attention
-
-    W_Q = einops.rearrange(attention.self.query.weight, "m (i h) -> i m h", i=cfg.n_heads)
-    b_Q = einops.rearrange(attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads)
-
-    W_K = einops.rearrange(attention.self.key.weight, "m (i h) -> i m h", i=cfg.n_heads)
-    b_K = einops.rearrange(attention.self.key.bias, "(i h) -> i h", i=cfg.n_heads)
-
-    W_V = einops.rearrange(attention.self.value.weight, "m (i h) -> i m h", i=cfg.n_heads)
-    b_V = einops.rearrange(attention.self.value.bias, "(i h) -> i h", i=cfg.n_heads)
-
-    W_O = einops.rearrange(attention.output.dense.weight, "(i h) m->i h m", i=cfg.n_heads)
-
-    state_dict["W_Q"] = W_Q
-    state_dict["b_Q"] = b_Q
-
-    state_dict["W_K"] = W_K
-    state_dict["b_K"] = b_K
-
-    state_dict["W_V"] = W_V
-    state_dict["b_V"] = b_V
-
-    # TODO is output correct?
-
-    state_dict["W_O"] = W_O
-    state_dict["b_O"] = attention.output.dense.bias
-
-    return state_dict
-
-
-    # our_attention = MaskedAttention(cfg)
-    #
-    # state_dict = convert_bert_attention_weights(hf_bert, cfg)
-    #
-    # our_attention.load_state_dict(state_dict)
-    #
-    # hf_attention_self = hf_bert.bert.encoder.layer[0].attention.self
-    # hf_attention_out = hf_bert.bert.encoder.layer[0].attention.output.dense
-    # hf_attention_self_output = hf_attention_self(embed_out)[0]
-    their_attention_output = hf_attention_out(hf_attention_self_output)
-
-    # state_dict = convert_bert_attention_weights(
-    #     hf_attention_self, hf_attention_out
-    # )
-    # our_attention.load_state_dict(state_dict)
-    # breakpoint()
-#
-#     our_attention_output = our_attention(embed_out)
-#
-#     assert our_attention_output.shape == their_attention_output.shape
-#
-#
-# def test_bert_attention_wip():
-#     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-#     sequence = "Hello, world!"
-#
-#     input_ids = tokenizer(sequence, return_tensors="pt")["input_ids"]
-#
-#     cfg = convert_hf_model_cfg()
-#
-#     hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
-#     hf_embed = hf_bert.bert.embeddings
-#     embed_out = hf_embed(input_ids)
-#
-#     hf_attention = hf_bert.bert.encoder.layer[0].attention
-#
-#     state_dict = {
-#         "W_Q":  einops.rearrange(
-#             hf_attention.self.query.weight, "m (i h) -> i m h", i=cfg.n_heads
-#         ),
-#         "b_Q": einops.rearrange(
-#             hf_attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads
-#         )
-#     }
-#
-#     q = JustQ(cfg)
-#     q.load_state_dict(state_dict)
-#
-#     hf_q = hf_attention.self.query
-#
-#     q_out = q(embed_out)
-#     hf_q_out = hf_q(embed_out)
-#     hf_q_reshape = einops.rearrange(hf_q_out, "batch pos (head_index d_head) -> batch pos head_index d_head", head_index=cfg.n_heads)
-#
-#     assert_close(q(embed_out), hf_q_reshape)
-#
-#
-# class JustQ(nn.Module):
-#     def __init__(self, cfg):
-#         super().__init__()
-#         self.cfg = cfg
-#         self.W_Q = nn.Parameter(torch.empty(cfg.n_heads, cfg.d_model, cfg.d_head))
-#         self.b_Q = nn.Parameter(torch.zeros(cfg.n_heads, cfg.d_head))
-#
-#     def forward(self, resid):
-#         return einsum(
-#             "batch pos d_model, head_index d_model d_head \
-#             -> batch pos head_index d_head",
-#             resid,
-#             self.W_Q,
-#         ) + self.b_Q
-#
-#
+    pass

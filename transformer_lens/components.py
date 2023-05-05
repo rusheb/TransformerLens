@@ -1,4 +1,3 @@
-import math
 import logging
 from functools import *
 from typing import Dict, Optional, Tuple, Union
@@ -129,7 +128,7 @@ class BertEmbed(nn.Module):
     def forward(self, input_ids, token_type_ids=None):
         base_index_id = torch.arange(input_ids.shape[1], device=input_ids.device)
         index_ids = einops.repeat(
-            base_index_id, "seq -> batch seq", batch=input_ids.shape[0]
+            base_index_id, "pos -> batch pos", batch=input_ids.shape[0]
         )
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
@@ -440,6 +439,7 @@ class Attention(nn.Module):
             )
             + self.b_Q
         )  # [batch, pos, head_index, d_head]
+
         k = self.hook_k(
             einsum(
                 f"{qkv_einops_string}, head_index d_model d_head \
@@ -645,59 +645,57 @@ class MaskedAttention(nn.Module):
         if isinstance(cfg, dict):
             cfg = HookedEncoderConfig.from_dict(cfg)
         self.cfg = cfg
-        self.query = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
         self.key = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
         self.value = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
 
-    def attention_pattern(self, x):
-        q = self.query(x)
-        k = self.key(x)
-        q = einops.rearrange(
-            q,
-            "batch seq (head head_size) -> batch head seq head_size",
-            head=self.cfg.n_heads,
+        self.W_Q = nn.Parameter(
+            torch.empty(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
         )
+        self.b_Q = nn.Parameter(torch.zeros(self.cfg.n_heads, self.cfg.d_head))
+
+        self.W_O = nn.Parameter(
+            torch.empty(self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model)
+        )
+        self.b_O = nn.Parameter(torch.zeros(self.cfg.d_model))
+
+    def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]):
+        q = einsum(
+            "batch pos d_model, head_index d_model d_head -> batch pos head_index d_head",
+            resid,
+            self.W_Q
+        ) + self.b_Q
+
+        k = self.key(resid)
         k = einops.rearrange(
             k,
-            "batch seq (head head_size) -> batch head seq head_size",
-            head=self.cfg.n_heads,
+            "batch pos (head_index d_head) -> batch pos head_index d_head",
+            head_index=self.cfg.n_heads,
         )
-        result = einsum(
-            "batch head seq_q head_size, batch head seq_k head_size -> batch head seq_q seq_k",
+
+        attn_scores = einsum(
+            "batch query_pos head_index d_head, batch key_pos head_index d_head -> batch head_index query_pos key_pos",
             q,
             k,
-        )
-        return result / (self.cfg.d_head**0.5)
+        ) / (self.cfg.d_head ** 0.5)
+        pattern = attn_scores.softmax(dim=-1)
 
-    def forward(self, x):
-        # here we do the computation per head
-        attention = (
-            self.attention_pattern(x)
-        )
-        attention = attention.softmax(dim=-1)
-        v = self.value(x)
+        v = self.value(resid)
         v = einops.rearrange(
             v,
-            "b seq (head head_size) -> b head seq head_size",
-            head=self.cfg.n_heads,
+            "b pos (head_index d_head) -> b pos head_index d_head",
+            head_index=self.cfg.n_heads,
         )
-        combined_values = einsum(
-            "b head seq_k head_size, b head seq_q seq_k -> b head seq_q head_size",
+        z = einsum(
+            "b key_pos head_index d_head, b head_index query_pos key_pos -> b query_pos head_index d_head",
             v,
-            attention,
+            pattern,
         )
 
-        rearranged = einops.rearrange(
-            combined_values, "b head seq head_size -> b seq (head head_size)"
-        )
-        return rearranged
-        ## TODO output
-        # return self.Output(
-        #     self_attention_output=self.w_o(rearranged),
-        #     attention_post_softmax=attention,
-        # )
-
-
+        return einsum(
+            "batch pos head_index d_head, head_index d_head d_model -> batch pos d_model",
+            z,
+            self.W_O,
+        ) + self.b_O
 
 
 # MLP Layers
