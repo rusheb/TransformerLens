@@ -28,7 +28,7 @@ def test_hooked_transformer_config_dict():
 
 
 def test_hooked_encoder_config_object():
-    hooked_transformer_config = HookedEncoderConfig(d_model=6, d_vocab=100, n_ctx=5)
+    hooked_transformer_config = HookedEncoderConfig(d_model=6, d_vocab=100, n_ctx=5, n_heads=2, d_head=3, n_layers=4)
     Embed(hooked_transformer_config)
 
 
@@ -37,6 +37,9 @@ def test_hooked_encoder_config_dict():
         "d_model": 6,
         "d_vocab": 100,
         "n_ctx": 5,
+        "n_heads": 2,
+        "d_head": 3,
+        "n_layers": 4,
         "model_type": "hooked_encoder",
     }
     Embed(hooked_encoder_config_dict)

@@ -72,7 +72,7 @@ def convert_bert_embedding_weights(bert, cfg: HookedEncoderConfig):
     return state_dict
 
 
-def test_bert_attention_load():
+def test_bert_attention():
     tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
     # TODO: change this
     sequence = "one token two tokens [MASK]"

@@ -644,36 +644,59 @@ class MaskedAttention(nn.Module):
         super().__init__()
         if isinstance(cfg, dict):
             cfg = HookedEncoderConfig.from_dict(cfg)
-        self.config = cfg
-        self.attention_head_size = cfg.d_model // cfg.n_heads
-        self.all_head_size = cfg.n_heads * self.attention_head_size
+        self.cfg = cfg
         self.query = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
         self.key = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
         self.value = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
 
-    def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
-        new_x_shape = x.size()[:-1] + (self.config.n_heads, self.config.d_head)
-        x = x.view(new_x_shape)
-        return x.permute(0, 2, 1, 3)
+    def attention_pattern(self, x):
+        q = self.query(x)
+        k = self.key(x)
+        q = einops.rearrange(
+            q,
+            "batch seq (head head_size) -> batch head seq head_size",
+            head=self.cfg.n_heads,
+        )
+        k = einops.rearrange(
+            k,
+            "batch seq (head head_size) -> batch head seq head_size",
+            head=self.cfg.n_heads,
+        )
+        result = einsum(
+            "batch head seq_q head_size, batch head seq_k head_size -> batch head seq_q seq_k",
+            q,
+            k,
+        )
+        return result / (self.cfg.d_head**0.5)
 
-    def forward(
-            self,
-            resid: torch.Tensor,
-    ) -> Tuple[torch.Tensor]:
-        query_layer = self.transpose_for_scores(self.query(resid))
-        key_layer = self.transpose_for_scores(self.key(resid))
-        value_layer = self.transpose_for_scores(self.value(resid))
+    def forward(self, x):
+        # here we do the computation per head
+        attention = (
+            self.attention_pattern(x)
+        )
+        attention = attention.softmax(dim=-1)
+        v = self.value(x)
+        v = einops.rearrange(
+            v,
+            "b seq (head head_size) -> b head seq head_size",
+            head=self.cfg.n_heads,
+        )
+        combined_values = einsum(
+            "b head seq_k head_size, b head seq_q seq_k -> b head seq_q head_size",
+            v,
+            attention,
+        )
 
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        rearranged = einops.rearrange(
+            combined_values, "b head seq head_size -> b seq (head head_size)"
+        )
+        return rearranged
+        ## TODO output
+        # return self.Output(
+        #     self_attention_output=self.w_o(rearranged),
+        #     attention_post_softmax=attention,
+        # )
 
-        context_layer = torch.matmul(attention_probs, value_layer)
-        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
-        context_layer = context_layer.view(new_context_layer_shape)
-
-        return context_layer
 
 
 
