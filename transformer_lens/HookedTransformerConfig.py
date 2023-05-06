@@ -9,12 +9,10 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
-from transformer_lens.TransformerLensConfig import TransformerLensConfig
-
 SUPPORTED_ACTIVATIONS = ["relu", "gelu", "silu", "gelu_new", "solu_ln", "gelu_fast"]
 
 @dataclass
-class HookedTransformerConfig(TransformerLensConfig):
+class HookedTransformerConfig:
     """
     Configuration class to store the configuration of a HookedTransformer model.
 

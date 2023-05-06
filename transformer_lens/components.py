@@ -591,65 +591,6 @@ class Attention(nn.Module):
         return torch.cat([x_rotated, x_pass], dim=-1)
 
 
-class MaskedAttention(nn.Module):
-    def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
-        super().__init__()
-        if isinstance(cfg, dict):
-            cfg = HookedTransformerConfig.from_dict(cfg)
-        self.cfg = cfg
-        self.key = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
-        self.value = nn.Linear(cfg.d_model, (cfg.n_heads * cfg.d_head))
-
-        self.W_Q = nn.Parameter(
-            torch.empty(self.cfg.n_heads, self.cfg.d_model, self.cfg.d_head)
-        )
-        self.b_Q = nn.Parameter(torch.zeros(self.cfg.n_heads, self.cfg.d_head))
-
-        self.W_O = nn.Parameter(
-            torch.empty(self.cfg.n_heads, self.cfg.d_head, self.cfg.d_model)
-        )
-        self.b_O = nn.Parameter(torch.zeros(self.cfg.d_model))
-
-    def forward(self, resid: Float[torch.Tensor, "batch pos d_model"]):
-        q = einsum(
-            "batch pos d_model, head_index d_model d_head -> batch pos head_index d_head",
-            resid,
-            self.W_Q
-        ) + self.b_Q
-
-        k = self.key(resid)
-        k = einops.rearrange(
-            k,
-            "batch pos (head_index d_head) -> batch pos head_index d_head",
-            head_index=self.cfg.n_heads,
-        )
-
-        attn_scores = einsum(
-            "batch query_pos head_index d_head, batch key_pos head_index d_head -> batch head_index query_pos key_pos",
-            q,
-            k,
-        ) / (self.cfg.d_head ** 0.5)
-        pattern = attn_scores.softmax(dim=-1)
-
-        v = self.value(resid)
-        v = einops.rearrange(
-            v,
-            "b pos (head_index d_head) -> b pos head_index d_head",
-            head_index=self.cfg.n_heads,
-        )
-        z = einsum(
-            "b key_pos head_index d_head, b head_index query_pos key_pos -> b query_pos head_index d_head",
-            v,
-            pattern,
-        )
-
-        return einsum(
-            "batch pos head_index d_head, head_index d_head d_model -> batch pos d_model",
-            z,
-            self.W_O,
-        ) + self.b_O
-
-
 # MLP Layers
 class MLP(nn.Module):
     def __init__(self, cfg: Union[Dict, HookedTransformerConfig]):
