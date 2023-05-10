@@ -197,7 +197,7 @@ class HookedTransformer(HookedRootModule):
         input, 
         return_type: Literal["both"], 
         loss_per_token: bool = False,
-        prepend_bos: bool = True,
+        prepend_bos: bool = ~True,
         stop_at_layer: Optional[int] = None, 
         past_kv_cache: Optional[HookedTransformerKeyValueCache] = None) -> Tuple[Float[torch.Tensor, "batch pos d_vocab"], Loss]:
         ...

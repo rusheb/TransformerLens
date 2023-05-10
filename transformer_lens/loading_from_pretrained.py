@@ -101,6 +101,7 @@ OFFICIAL_MODEL_NAMES = [
     "llama-13b-hf",
     "llama-30b-hf", 
     "llama-65b-hf",
+    "bert-base-cased"
 ]
 
 # Model Aliases:
@@ -437,7 +438,7 @@ def get_official_model_name(model_name: str):
     return official_model_name
 
 
-def convert_hf_model_config(official_model_name: str):
+def convert_hf_model_config(model_name: str):
     """
     Returns the model config for a HuggingFace model, converted to a dictionary
     in the HookedTransformerConfig format.
@@ -445,13 +446,14 @@ def convert_hf_model_config(official_model_name: str):
     Takes the official_model_name as an input.
     """
     # In case the user passed in an alias
-    official_model_name = get_official_model_name(official_model_name)
+    official_model_name = get_official_model_name(model_name)
     # Load HuggingFace model config
     if 'llama' not in official_model_name:
         hf_config = AutoConfig.from_pretrained(official_model_name)
         architecture = hf_config.architectures[0]
     else: 
         architecture = "LLaMAForCausalLM"
+
     if 'llama-7b' in official_model_name:
         cfg_dict = {
             "d_model": 4096,
@@ -609,6 +611,24 @@ def convert_hf_model_config(official_model_name: str):
         }
         rotary_pct = hf_config.rotary_pct
         cfg_dict["rotary_dim"] = round(rotary_pct * cfg_dict["d_head"])
+    elif architecture == "BertForMaskedLM":
+        cfg_dict = {
+            "d_model": hf_config.hidden_size,
+            "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
+            "n_heads": hf_config.num_attention_heads,
+            "d_mlp": hf_config.intermediate_size,
+            "n_layers": hf_config.num_hidden_layers,
+            "n_ctx": hf_config.max_position_embeddings,
+            "eps": hf_config.layer_norm_eps,
+            "d_vocab": hf_config.vocab_size,
+            "act_fn": "gelu",
+            "attention_dir": "bidirectional",
+            # TODO: do we want to specify the properties below or
+            #   just use the defaults from HookedTransformerConfig?
+            # "use_attn_scale": True,
+            # "use_local_attn": False,
+            # "normalization_type": "LN",
+        }
     else:
         raise NotImplementedError(f"{architecture} is not currently supported.")
     # All of these models use LayerNorm
@@ -836,7 +856,7 @@ def get_pretrained_state_dict(
         elif hf_model is None:
             if "llama" in official_model_name:
                 raise NotImplementedError("Must pass in hf_model for LLaMA models")
-            else: 
+            else:
                 hf_model = AutoModelForCausalLM.from_pretrained(official_model_name)
 
             # Load model weights, and fold in layer norm weights
@@ -852,6 +872,8 @@ def get_pretrained_state_dict(
             state_dict = convert_neox_weights(hf_model, cfg)
         elif cfg.original_architecture == "LLaMAForCausalLM": 
             state_dict = convert_llama_weights(hf_model, cfg)
+        elif cfg.original_architecture == "BertForMaskedLM":
+            state_dict = convert_bert_weights(hf_model.bert, cfg)
         else:
             raise ValueError(
                 f"Loading weights from the architecture is not currently supported: {cfg.original_architecture}, generated from model name {cfg.model_name}. Feel free to open an issue on GitHub to request this feature."
@@ -1278,5 +1300,44 @@ def convert_neel_solu_old_weights(state_dict: dict, cfg: HookedTransformerConfig
             if "W_" in k and "W_pos" not in k:
                 new_state_dict[k] = v.transpose(-2, -1)
     return new_state_dict
+
+
+def convert_bert_weights(bert, cfg: HookedTransformerConfig):
+    state_dict = {}
+
+    state_dict.update({
+        "embed.word_embed.W_E": bert.embeddings.word_embeddings.weight,
+        "embed.pos_embed.W_pos": bert.embeddings.position_embeddings.weight,
+        "embed.token_type_embed.W_token_type": bert.embeddings.token_type_embeddings.weight,
+        "embed.ln.w": bert.embeddings.LayerNorm.weight,
+        "embed.ln.b": bert.embeddings.LayerNorm.bias,
+    })
+
+    for l in range(cfg.n_layers):
+        block = bert.encoder.layer[l]
+        state_dict.update({
+            f"blocks.{l}.attn.W_Q": einops.rearrange(block.attention.self.query.weight, "(i h) m -> i m h",
+                                                     i=cfg.n_heads),
+            f"blocks.{l}.attn.b_Q": einops.rearrange(block.attention.self.query.bias, "(i h) -> i h", i=cfg.n_heads),
+            f"blocks.{l}.attn.W_K": einops.rearrange(block.attention.self.key.weight, "(i h) m -> i m h",
+                                                     i=cfg.n_heads),
+            f"blocks.{l}.attn.b_K": einops.rearrange(block.attention.self.key.bias, "(i h) -> i h", i=cfg.n_heads),
+            f"blocks.{l}.attn.W_V": einops.rearrange(block.attention.self.value.weight, "(i h) m -> i m h",
+                                                     i=cfg.n_heads),
+            f"blocks.{l}.attn.b_V": einops.rearrange(block.attention.self.value.bias, "(i h) -> i h", i=cfg.n_heads),
+            f"blocks.{l}.attn.W_O": einops.rearrange(block.attention.output.dense.weight, "m (i h) -> i h m",
+                                                     i=cfg.n_heads),
+            f"blocks.{l}.attn.b_O": block.attention.output.dense.bias,
+            f"blocks.{l}.ln1.w": block.attention.output.LayerNorm.weight,
+            f"blocks.{l}.ln1.b": block.attention.output.LayerNorm.bias,
+            f"blocks.{l}.mlp.W_in": einops.rearrange(block.intermediate.dense.weight, "mlp model -> model mlp"),
+            f"blocks.{l}.mlp.b_in": block.intermediate.dense.bias,
+            f"blocks.{l}.mlp.W_out": einops.rearrange(block.output.dense.weight, "model mlp -> mlp model"),
+            f"blocks.{l}.mlp.b_out": block.output.dense.bias,
+            f"blocks.{l}.ln2.w": block.output.LayerNorm.weight,
+            f"blocks.{l}.ln2.b": block.output.LayerNorm.bias
+        })
+
+    return state_dict
 
 # %%

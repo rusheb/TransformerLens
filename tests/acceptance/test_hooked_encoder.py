@@ -1,10 +1,75 @@
 from einops import einops
 from torch.testing import assert_close
-from transformers import AutoTokenizer, AutoConfig, BertModel
+from transformers import AutoTokenizer, AutoConfig, BertModel, BertForMaskedLM, AutoModelForMaskedLM, \
+    AutoModelForCausalLM
 
-from transformer_lens import HookedTransformerConfig
+import transformer_lens.loading_from_pretrained as loading
+from transformer_lens import HookedTransformerConfig, HookedTransformer
 from transformer_lens.HookedEncoder import HookedEncoder
 from transformer_lens.components import BertEmbed, Attention, BertBlock
+
+
+
+## entire module
+## embeddings
+## self attention
+## full BertBlock
+
+def test_bert_head_finetuned():
+    masked = AutoModelForMaskedLM.from_pretrained("bert-base-cased")
+    causal = AutoModelForCausalLM.from_pretrained("bert-base-cased")
+
+
+    masked_weight = masked.cls.predictions.transform.dense.weight
+    causal_weight = causal.cls.predictions.transform.dense.weight
+
+    assert_close(masked_weight, causal_weight)
+
+
+def test_pretrained_bert():
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+    input_ids = tokenizer("Hello, world!", return_tensors="pt")["input_ids"]
+
+    hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased").bert
+    # our_bert = HookedEncoder.from_pretrained("bert-base-cased")
+    gpt = HookedTransformer.from_pretrained("gpt2")
+
+    hf_bert_out = hf_bert(input_ids)[0]
+    our_bert_out = our_bert(input_ids)
+    assert_close(hf_bert_out, our_bert_out)
+
+def test_get_pretrained_config():
+    expected = convert_hf_model_cfg()
+    actual = loading.get_pretrained_model_config("bert-base-cased")
+
+    assert expected == actual
+
+def test_get_pretrained_state_dict():
+    cfg = convert_hf_model_cfg()
+    hf_bert = BertModel.from_pretrained("bert-base-cased")
+    expected = convert_bert_state_dict(hf_bert, cfg)
+    actual = loading.get_pretrained_state_dict("bert-base-cased", cfg)
+
+    for k in expected.keys():
+        assert_close(expected[k], actual[k])
+
+
+def test_full_bert():
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+    input_ids = tokenizer("Hello, world!", return_tensors="pt")["input_ids"]
+
+    cfg = convert_hf_model_cfg()
+
+    # hf_bert = BertModel.from_pretrained("bert-base-cased")
+    hf_bert = BertForMaskedLM.from_pretrained("bert-base-cased")
+    our_bert = HookedEncoder(cfg)
+
+    state_dict = convert_bert_state_dict(hf_bert.bert, cfg)
+    our_bert.load_state_dict(state_dict, strict=False)
+
+    hf_bert_out = hf_bert.bert(input_ids)[0]
+    our_bert_out = our_bert(input_ids)
+    assert_close(hf_bert_out, our_bert_out)
 
 
 def test_bert_embed_one_sentence():
@@ -46,15 +111,21 @@ def load_embed():
 def convert_hf_model_cfg() -> HookedTransformerConfig:
     hf_config = AutoConfig.from_pretrained("bert-base-cased")
     cfg_dict = {
-        "d_vocab": hf_config.vocab_size,
         "d_model": hf_config.hidden_size,
-        "n_ctx": hf_config.max_position_embeddings,
-        "n_heads": hf_config.num_attention_heads,
         "d_head": hf_config.hidden_size // hf_config.num_attention_heads,
-        "act_fn": "gelu",
+        "n_heads": hf_config.num_attention_heads,
+        # d_mlp ...
         "n_layers": hf_config.num_hidden_layers,
+        "n_ctx": hf_config.max_position_embeddings,
         "eps": hf_config.layer_norm_eps,
+        "d_vocab": hf_config.vocab_size,
+        "act_fn": "gelu",
         "attention_dir": "bidirectional",
+        # these will be added automatically when we do from_pretrained
+        "init_weights": False,
+        "model_name": "bert-base-cased",
+        # "original_architecture": "BertForMaskedLM",
+        "tokenizer_name": "bert-base-cased"
     }
     return HookedTransformerConfig.from_dict(cfg_dict)
 
@@ -139,21 +210,6 @@ def test_bert_block():
     assert_close(our_block_out, hf_block_out[0])
 
 
-def test_bert_embed_and_blocks():
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
-    input_ids = tokenizer("Hello, world!", return_tensors="pt")["input_ids"]
-
-    cfg = convert_hf_model_cfg()
-
-    hf_bert = BertModel.from_pretrained("bert-base-cased")
-    our_bert = HookedEncoder(cfg)
-
-    state_dict = convert_bert_state_dict(hf_bert, cfg)
-    our_bert.load_state_dict(state_dict, strict=False)
-
-    hf_bert_out = hf_bert(input_ids)[0]
-    our_bert_out = our_bert(input_ids)
-    assert_close(hf_bert_out, our_bert_out)
 
 
 def convert_bert_state_dict(bert, cfg: HookedTransformerConfig):
