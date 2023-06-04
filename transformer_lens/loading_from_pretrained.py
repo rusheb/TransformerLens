@@ -1022,16 +1022,16 @@ def convert_state_dict(
 def convert_gpt2_weights(gpt2, cfg: HookedTransformerConfig):
     state_dict = {}
 
-    state_dict["embed.W_E"] = gpt2.transformer.wte.weight
-    state_dict["pos_embed.W_pos"] = gpt2.transformer.wpe.weight
+    state_dict["embed.W_E"] = gpt2.transformer.wte.weight.detach()
+    state_dict["pos_embed.W_pos"] = gpt2.transformer.wpe.weight.detach()
 
     for l in range(cfg.n_layers):
-        state_dict[f"blocks.{l}.ln1.w"] = gpt2.transformer.h[l].ln_1.weight
-        state_dict[f"blocks.{l}.ln1.b"] = gpt2.transformer.h[l].ln_1.bias
+        state_dict[f"blocks.{l}.ln1.w"] = gpt2.transformer.h[l].ln_1.weight.detach()
+        state_dict[f"blocks.{l}.ln1.b"] = gpt2.transformer.h[l].ln_1.bias.detach()
 
         # In GPT-2, q,k,v are produced by one big linear map, whose output is
         # concat([q, k, v])
-        W = gpt2.transformer.h[l].attn.c_attn.weight
+        W = gpt2.transformer.h[l].attn.c_attn.weight.detach()
         W_Q, W_K, W_V = torch.tensor_split(W, 3, dim=1)
         W_Q = einops.rearrange(W_Q, "m (i h)->i m h", i=cfg.n_heads)
         W_K = einops.rearrange(W_K, "m (i h)->i m h", i=cfg.n_heads)
@@ -1041,7 +1041,7 @@ def convert_gpt2_weights(gpt2, cfg: HookedTransformerConfig):
         state_dict[f"blocks.{l}.attn.W_K"] = W_K
         state_dict[f"blocks.{l}.attn.W_V"] = W_V
 
-        qkv_bias = gpt2.transformer.h[l].attn.c_attn.bias
+        qkv_bias = gpt2.transformer.h[l].attn.c_attn.bias.detach()
         qkv_bias = einops.rearrange(
             qkv_bias,
             "(qkv index head)->qkv index head",
@@ -1053,25 +1053,25 @@ def convert_gpt2_weights(gpt2, cfg: HookedTransformerConfig):
         state_dict[f"blocks.{l}.attn.b_K"] = qkv_bias[1]
         state_dict[f"blocks.{l}.attn.b_V"] = qkv_bias[2]
 
-        W_O = gpt2.transformer.h[l].attn.c_proj.weight
+        W_O = gpt2.transformer.h[l].attn.c_proj.weight.detach()
         W_O = einops.rearrange(W_O, "(i h) m->i h m", i=cfg.n_heads)
         state_dict[f"blocks.{l}.attn.W_O"] = W_O
-        state_dict[f"blocks.{l}.attn.b_O"] = gpt2.transformer.h[l].attn.c_proj.bias
+        state_dict[f"blocks.{l}.attn.b_O"] = gpt2.transformer.h[l].attn.c_proj.bias.detach()
 
-        state_dict[f"blocks.{l}.ln2.w"] = gpt2.transformer.h[l].ln_2.weight
-        state_dict[f"blocks.{l}.ln2.b"] = gpt2.transformer.h[l].ln_2.bias
+        state_dict[f"blocks.{l}.ln2.w"] = gpt2.transformer.h[l].ln_2.weight.detach()
+        state_dict[f"blocks.{l}.ln2.b"] = gpt2.transformer.h[l].ln_2.bias.detach()
 
-        W_in = gpt2.transformer.h[l].mlp.c_fc.weight
+        W_in = gpt2.transformer.h[l].mlp.c_fc.weight.detach()
         state_dict[f"blocks.{l}.mlp.W_in"] = W_in
-        state_dict[f"blocks.{l}.mlp.b_in"] = gpt2.transformer.h[l].mlp.c_fc.bias
+        state_dict[f"blocks.{l}.mlp.b_in"] = gpt2.transformer.h[l].mlp.c_fc.bias.detach()
 
-        W_out = gpt2.transformer.h[l].mlp.c_proj.weight
+        W_out = gpt2.transformer.h[l].mlp.c_proj.weight.detach()
         state_dict[f"blocks.{l}.mlp.W_out"] = W_out
-        state_dict[f"blocks.{l}.mlp.b_out"] = gpt2.transformer.h[l].mlp.c_proj.bias
-    state_dict["unembed.W_U"] = gpt2.lm_head.weight.T
+        state_dict[f"blocks.{l}.mlp.b_out"] = gpt2.transformer.h[l].mlp.c_proj.bias.detach()
+    state_dict["unembed.W_U"] = gpt2.lm_head.weight.T.detach()
 
-    state_dict["ln_final.w"] = gpt2.transformer.ln_f.weight
-    state_dict["ln_final.b"] = gpt2.transformer.ln_f.bias
+    state_dict["ln_final.w"] = gpt2.transformer.ln_f.weight.detach()
+    state_dict["ln_final.b"] = gpt2.transformer.ln_f.bias.detach()
     return state_dict
 
 
